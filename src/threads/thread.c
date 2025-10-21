@@ -72,6 +72,18 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
+/* Comparison function for thread priorities (higher priority first).
+   Returns true if thread A should come before thread B in a priority queue.
+   Used by list_insert_ordered() and list_sort() for priority scheduling. */
+bool
+thread_priority_less (const struct list_elem *a, const struct list_elem *b,
+                      void *aux UNUSED)
+{
+  struct thread *thread_a = list_entry (a, struct thread, elem);
+  struct thread *thread_b = list_entry (b, struct thread, elem);
+  return thread_a->priority > thread_b->priority;
+}
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -202,6 +214,10 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
+  /* Yield if the new thread has higher priority than the current thread. */
+  if (priority > thread_current ()->priority)
+    thread_yield ();
+
   return tid;
 }
 
@@ -238,7 +254,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered (&ready_list, &t->elem, thread_priority_less, NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -309,7 +325,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered (&ready_list, &cur->elem, thread_priority_less, NULL);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -336,7 +352,8 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  thread_current ()->base_priority = new_priority;
+  thread_refresh_priority ();
 }
 
 /* Returns the current thread's priority. */
@@ -344,6 +361,49 @@ int
 thread_get_priority (void) 
 {
   return thread_current ()->priority;
+}
+
+/* Recalculates the current thread's priority based on its base priority
+   and any donations from threads waiting on locks it holds. */
+void
+thread_refresh_priority (void)
+{
+  struct thread *cur = thread_current ();
+  enum intr_level old_level = intr_disable ();
+
+  int max_priority = cur->base_priority;
+
+  /* Check all locks held for higher-priority waiters. */
+  if (!list_empty (&cur->locks_held))
+    {
+      struct list_elem *e;
+      for (e = list_begin (&cur->locks_held); e != list_end (&cur->locks_held);
+           e = list_next (e))
+        {
+          struct lock *lock = list_entry (e, struct lock, elem);
+          if (!list_empty (&lock->semaphore.waiters))
+            {
+              /* Find highest priority waiter on this lock. */
+              struct list_elem *we = list_max (&lock->semaphore.waiters,
+                                               thread_priority_less, NULL);
+              struct thread *waiter = list_entry (we, struct thread, elem);
+              if (waiter->priority > max_priority)
+                max_priority = waiter->priority;
+            }
+        }
+    }
+
+  cur->priority = max_priority;
+  intr_set_level (old_level);
+
+  /* Yield if there's a higher priority thread in the ready queue. */
+  if (!list_empty (&ready_list))
+    {
+      struct thread *highest = list_entry (list_front (&ready_list),
+                                           struct thread, elem);
+      if (highest->priority > cur->priority)
+        thread_yield ();
+    }
 }
 
 /* Sets the current thread's nice value to NICE. */
@@ -462,9 +522,12 @@ init_thread (struct thread *t, const char *name, int priority)
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
+  t->waiting_on = NULL;
+  list_init (&t->locks_held);
   t->priority = priority;
+  t->base_priority = priority;
   t->magic = THREAD_MAGIC;
-  t->wake_time = 0;  /* Initialize wake_time to 0. */
+  t->wake_time = 0;
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

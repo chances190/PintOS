@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"  /* for struct lock forward use */
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -81,29 +82,35 @@ typedef int tid_t;
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
 struct thread
-  {
-    /* Owned by thread.c. */
-    tid_t tid;                          /* Thread identifier. */
-    enum thread_status status;          /* Thread state. */
-    char name[16];                      /* Name (for debugging purposes). */
-    uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
-    struct list_elem allelem;           /* List element for all threads list. */
-
-    /* Shared between thread.c and synch.c. */
-    struct list_elem elem;              /* List element. */
+{
+   /* Owned by thread.c. */
+   tid_t tid;                          /* Thread identifier. */
+   enum thread_status status;          /* Thread state. */
+   char name[16];                      /* Name (for debugging purposes). */
+   uint8_t *stack;                     /* Saved stack pointer. */
 
 #ifdef USERPROG
-    /* Owned by userprog/process.c. */
-    uint32_t *pagedir;                  /* Page directory. */
+   /* Owned by userprog/process.c. */
+   uint32_t *pagedir;                  /* Page directory. */
 #endif
 
-    /* Owned by thread.c. */
-    unsigned magic;                     /* Detects stack overflow. */
-    
-    /* For timer sleep implementation. */
-    int64_t wake_time;                  /* Time to wake up (in ticks). */
-  };
+   /* Owned by thread.c */
+   struct list_elem allelem;           /* List element for all threads list. */
+
+   /* Shared between thread.c and synch.c. */
+   struct list_elem elem;              /* List element (ready list / wait list). */
+   struct lock *waiting_on;            /* Lock this thread is waiting on (if any). */
+   struct list locks_held;             /* Locks currently held by this thread. */
+
+   /* Owned by thread.c. */
+   int priority;                       /* Priority. */
+   int base_priority;                  /* Original (non-donated) priority. */
+
+   unsigned magic;                     /* Detects stack overflow. */
+
+   /* Owned by thread.c */
+   int64_t wake_time;                  /* Time to wake up (in ticks). */
+};
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -133,12 +140,16 @@ void thread_yield (void);
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
+bool thread_priority_less (const struct list_elem *a, const struct list_elem *b,
+                           void *aux);
 int thread_get_priority (void);
 void thread_set_priority (int);
+void thread_refresh_priority (void);
 
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
 
 #endif /* threads/thread.h */
