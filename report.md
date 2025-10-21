@@ -3,108 +3,122 @@
 ## Parte 1: Thread Sleep (Alarm Clock)
 
 ### Resumo
-Implementação de um mecanismo de bloqueio de thread e alarme para substituir a abordagem de busy-wait em `timer_sleep()`.
+Implementação de bloqueio de threads e de um alarme para eliminar o busy-wait em `timer_sleep()`.
 
-### `src/threads/thread.h` e `src/threads/thread.c`
-- Adicionado campo `int64_t wake_time` ao `struct thread`, para armazenar a contagem absoluta de ticks de quando uma thread adormecida deve acordar
-- Modificado `init_thread()` para inicializar o campo `wake_time` em 0
+### src/threads/thread.h e src/threads/thread.c
+- Adicionado o campo `int64_t wake_time` em `struct thread` para armazenar o tick de reativação.  
+- Ajustado `init_thread()` para inicializar `wake_time` com zero.
 
-### `src/devices/timer.c`
-- Adicionado include para `lib/kernel/list.h`
-- Adicionado `sleep_list` estático para rastrear threads adormecidas
-- Implementada função de comparação de lista `wake_time_less()`
-- Modificado `timer_init()` para inicializar a lista de sono
-- Reescrito `timer_sleep()` para usar bloqueio de threads
-- Modificado `timer_interrupt()` para acordar threads adormecidas
+### src/devices/timer.c
+- Incluído `lib/kernel/list.h`.  
+- Criada lista estática `sleep_list` para gerenciar threads adormecidas.  
+- Implementada a função de comparação `wake_time_less()`.  
+- Atualizado `timer_init()` para inicializar `sleep_list`.  
+- Reescrito `timer_sleep()` para usar bloqueio de threads.  
+- Alterado `timer_interrupt()` para acordar threads cujo `wake_time` já passou.
 
 ### Design
 
-**Thread Sleep:**
-1. Thread chama `timer_sleep(ticks)`
-2. Calcula `wake_time = current_ticks + ticks`
-3. Desativa interrupções (seção crítica)
-4. Insere thread em `sleep_list` ordenada por `wake_time`
-5. Bloqueia a thread (remove da fila pronta, define status como BLOCKED)
-6. Reativa interrupções
-7. Escalonador executa próxima thread pronta
+**Thread Sleep**  
+1. A thread invoca `timer_sleep(ticks)`.  
+2. Calcula `wake_time = current_ticks + ticks`.  
+3. Desativa interrupções (seção crítica).  
+4. Insere a thread em `sleep_list`, ordenada por `wake_time`.  
+5. Bloqueia a thread (remove-a da fila de prontos, estado BLOCKED).  
+6. Reativa interrupções.  
+7. O escalonador executa a próxima thread pronta.
 
-**Thread Wake-Up:**
-1. Interrupção do timer dispara (a cada tick)
-2. Incrementa contador global `ticks`
-3. Verifica início de `sleep_list`
-4. Enquanto threads existem com `wake_time <= current_ticks`:
-   - Remove thread de `sleep_list`
-   - Desbloqueia thread (adiciona à fila pronta, define status como READY)
-5. Para ao encontrar thread com `wake_time` futuro
+**Thread Wake-Up**  
+1. A cada tick, a interrupção de timer é disparada.  
+2. Incrementa o contador global `ticks`.  
+3. Examina o início de `sleep_list`.  
+4. Enquanto `wake_time <= current_ticks`:  
+   - Remove a thread de `sleep_list`.  
+   - Desbloqueia a thread (adiciona-a à fila de prontos, estado READY).  
+5. Encerra ao encontrar uma thread com `wake_time` futuro.
 
 ### Resultados de Testes
-
-Todos os testes de relógio de alarme passaram:
-- ✅ `alarm-single`: Funcionalidade básica de sono
-- ✅ `alarm-multiple`: Múltiplas threads dormindo
-- ✅ `alarm-simultaneous`: Threads acordando no mesmo tempo
-- ✅ `alarm-priority`: Sono não afeta escalonamento de prioridade
-- ✅ `alarm-zero`: Dormir por 0 ticks (caso extremo)
-- ✅ `alarm-negative`: Dormir por ticks negativos (caso extremo)
+- ✅ `alarm-single`: Funcionamento básico de sono.  
+- ✅ `alarm-multiple`: Suporte a múltiplas threads adormecidas.  
+- ✅ `alarm-simultaneous`: Acordar threads no mesmo tick.  
+- ✅ `alarm-priority`: Sono não afeta a precedência de prioridade.  
+- ✅ `alarm-zero`: Dormir por 0 ticks.  
+- ✅ `alarm-negative`: Dormir por ticks negativos.
 
 ---
-### Modificações nos ficheiros
 
-### `src/threads/thread.c` e `src/threads/thread.h`
-- Implementada função de comparação de lista `thread_priority_less()`
-- Modificados `thread_unblock()` e `thread_yield()` para inserir threads em ordem
-- Acrescentadoas verificações de preempção de prioridade em `thread_create()` e `thread_set_priority()` 
+## Parte 2.1: Escalonador por Prioridade
 
-###  `src/threads/synch.c`
-- Implementada função de comparação de lista `cond_priority_less()`
-- Reescrito `sema_up()` para ordenar `sema->waiters` por prioridade e verificar preempção de prioridade
-- Reescrito `cond_signal()` para ordenar `cond->waiters` por prioridade e sinalizar o elemento de maior prioridade
+Implementação de escalonamento preemptivo baseado em prioridades.
 
+### src/threads/thread.h e src/threads/thread.c
+- Criada a função de comparação `thread_priority_less()`.  
+- Ajustados `thread_unblock()` e `thread_yield()` para inserir threads na `ready_list` em ordem de prioridade.  
+- Acrescentadas verificações de preempção em `thread_create()` e `thread_set_priority()`.
 
-### Design 
+### src/threads/synch.c
+- Implementada a função de comparação `cond_priority_less()`.  
+- Reescrito `sema_up()` para ordenar `sema->waiters` por prioridade e verificar preempção.  
+- Reescrito `cond_signal()` para sinalizar o waiter de maior prioridade.
 
-**Criação de thread**
-1. `thread_create()` inicializa a nova thread e chama `thread_unblock(t)` para colocá‑la na `ready_list`
-2. `thread_unblock()` insere thread na `ready_list` em ordem por prioridade
-3. `thread_create()` verifica se a nova thread tem prioridade maior que a thread atual; se sim, a thread atual chama `thread_yield()` para preempção.
+### Design
 
-**Escalonamento**
-1. `thread_yield()` insere a thread atual de volta na `ready_list` em ordem por prioridade (O(n)) e chama o escalonador para escolher a próxima execução
-2. Escalonador escolhe primeira thread da `ready_list`. Como a lista é ordenada, a seleção é O(1)
+**Criação de Thread**  
+1. `thread_create()` inicializa a nova thread e chama `thread_unblock()`.  
+2. `thread_unblock()` insere em `ready_list`, preservando ordem por prioridade.  
+3. Se a nova thread tiver prioridade maior que a atual, `thread_create()` provoca `thread_yield()`.
 
-**Sincronização**
-1. Ao chamar `sema_down()`/`lock_acquire()`/`cond_wait()` a thread é removida da `ready_list` e colocada no fim da lista de waiters correspondente.
-2. `cond_signal()` ordena `cond->waiters` por prioridade comparando o primeiro waiter de cada `semaphore_elem` e sinaliza o que contém o waiter de maior prioridade.
-3. Em `sema_up()` o código ordena `sema->waiters` por prioridade no momento do desbloqueio , selecionando a thread com maior prioridade atual.
-4. Após desbloquear, verifica-se se a nova thread tem prioridade maior que a thread atual; se sim, a thread atual chama `thread_yieald()` para preempção
+**Escalonamento**  
+1. `thread_yield()` reinserta a thread atual em `ready_list` por prioridade (O(n)).  
+2. O escalonador seleciona a primeira thread de `ready_list` (O(1)).
 
+**Sincronização**  
+1. Em `sema_down()`/`lock_acquire()`/`cond_wait()`, a thread é removida de `ready_list` e inserida em `waiters`.  
+2. `cond_signal()` ordena e sinaliza o waiter de maior prioridade.  
+3. `sema_up()` ordena `sema->waiters` antes de liberar e verifica preempção.
 
-**Mudança de prioridade**
-1. `thread_set_priority()` atualiza a prioridade, e em seguida verifica se a nova thread tem prioridade maior que a thread atual; se sim, a thread atual chama `thread_yield()` para permitir preempção.
+**Mudança de Prioridade**  
+1. `thread_set_priority()` atualiza a prioridade e verifica se deve chamar `thread_yield()`.
 
 ### Testes
-Todos os testes de preempção passaram. Os testes de doação de prioridade falharam porque a doação ainda não foi implementada:
-
-- ✅ `priority-change`: Mudança explícita de prioridade reflete no escalonador imediatamente
-- ✅ `priority-fifo`: Threads com mesma prioridade respeitam ordem FIFO
-- ✅ `priority-preempt`: Criação/alteração de ready de maior prioridade causa preempção imediata
-- ✅ `priority-sema`: Semáforo acorda a thread de maior prioridade disponível
-- ✅ `priority-condvar`: Condvar sinaliza o waiter de maior prioridade
-- ❌ `priority-donate-one`: Doação simples (um nível)
-- ❌ `priority-donate-multiple`: Doação envolvendo múltiplos waiters
-- ❌ `priority-donate-multiple2`: Variante de cenário múltiplo
-- ❌ `priority-donate-nest`: Doação aninhada / propagação transitiva
-- ❌ `priority-donate-sema`: Doação em casos com semáforos
-- ❌ `priority-donate-lower`: Casos onde o holder tem prioridade menor
-- ❌ `priority-donate-chain`: Cadeia de doações transitivas
-
-### Próximos passos recomendados
-
-1. Adicionar campos em `struct thread` para suportar doação: `base_priority`, `locks_held` e `lock_waiting_on`.
-2. Implementar doação de prioridade em `lock_acquire()` (doar ao holder e propagar transitivamente).
-3. Atualizar `lock_release()` para remover doações associadas e recalcular a prioridade efetiva.
-4. Ajustar `thread_get_priority()`/`thread_set_priority()` para considerar doações e base_priority.
-
-Com essas mudanças a implementação passará os testes de doação e evitará inversão de prioridade em casos com cadeias de locks.
+- ✅ `priority-change`: Alteração de prioridade refletida imediatamente.  
+- ✅ `priority-fifo`: Respeito à ordem FIFO entre iguais.  
+- ✅ `priority-preempt`: Preempção imediata ao surgir maior prioridade.  
+- ✅ `priority-sema`: Semáforo acorda o waiter de maior prioridade.  
+- ✅ `priority-condvar`: Condvar sinaliza o waiter de maior prioridade.
 
 ---
+
+## Parte 2.2: Doação de Prioridade
+
+Implementação de doação de prioridade para prevenir inversão.
+
+### src/threads/thread.h e src/threads/thread.c
+- Incluídos `int base_priority`, `struct list locks_held` e `struct lock *waiting_on` em `struct thread`.  
+- `init_thread()` agora inicializa `base_priority`, `locks_held` e `waiting_on`.  
+- Criada `thread_refresh_priority()` para recalcular a prioridade efetiva e verificar preempção.  
+- `thread_set_priority()` modificado para alterar `base_priority`.
+
+### src/threads/synch.h e src/threads/synch.c
+- Adicionado `struct list_elem elem` em `struct lock` para rastrear `locks_held`.  
+- Implementada `donate_chain()` para doação transitiva.  
+- Reescrito `lock_acquire()`:  
+  - Define `current->waiting_on` e doa prioridade ao holder.  
+  - Após adquirir, limpa `waiting_on`, adiciona o lock em `locks_held` e atualiza `holder`.  
+- Reescrito `lock_release()` para remover o lock de `locks_held` e chamar `thread_refresh_priority()`.
+
+### Design
+1. Cada thread mantém `base_priority`, lista de `locks_held` e o lock `waiting_on`.  
+2. Ao bloquear em lock ocupado, doa prioridade ao holder e propaga pela cadeia `waiting_on`.  
+3. A prioridade efetiva é o máximo entre `base_priority` e as doações de todos os locks em `locks_held`.  
+4. Em `lock_release()`, remove-se a doação associada e recalcula-se a prioridade.  
+5. Após qualquer alteração de prioridade, se houver thread pronta com maior prioridade, ocorre preempção.
+
+### Testes
+- ✅ `priority-donate-one`: Doação de prioridade simples.  
+- ✅ `priority-donate-multiple`: Doação para múltiplos holders.  
+- ✅ `priority-donate-multiple2`: Múltiplas doações simultâneas.  
+- ✅ `priority-donate-nest`: Doação transitiva.  
+- ✅ `priority-donate-sema`: Doação envolvendo semáforos.  
+- ✅ `priority-donate-lower`: Doação de prioridade menor.  
+- ✅ `priority-donate-chain`: Cadeia de doações transitivas.  

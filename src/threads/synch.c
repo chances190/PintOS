@@ -32,6 +32,23 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+/* Bounded transitive donation depth to avoid long chains/loops. */
+#define DONATION_MAX_DEPTH 8
+
+static void
+donate_chain (struct thread *donor, struct lock *lock)
+{
+  int depth = 0;
+  while (lock != NULL && lock->holder != NULL && depth++ < DONATION_MAX_DEPTH)
+    {
+      struct thread *holder = lock->holder;
+      if (holder->priority >= donor->priority)
+        break;
+      holder->priority = donor->priority;   /* Temporary raise; final value recalculated on release. */
+      lock = holder->waiting_on;            /* Propagate through the chain. */
+    }
+}
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -210,8 +227,26 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+  enum intr_level old_level = intr_disable ();
+
+  /* Prepare to donate while waiting. */
+  struct thread *cur = thread_current ();
+  if (lock->holder != NULL)
+    {
+      cur->waiting_on = lock;
+      donate_chain (cur, lock);
+    }
+
+  intr_set_level (old_level);
+
   sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
+
+  /* Acquired: become holder, stop waiting, and track ownership. */
+  old_level = intr_disable ();
+  lock->holder = cur;
+  cur->waiting_on = NULL;
+  list_push_back (&cur->locks_held, &lock->elem);
+  intr_set_level (old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -240,13 +275,24 @@ lock_try_acquire (struct lock *lock)
    make sense to try to release a lock within an interrupt
    handler. */
 void
-lock_release (struct lock *lock) 
+lock_release (struct lock *lock)
 {
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
+  enum intr_level old_level = intr_disable ();
+
+  /* Drop ownership before waking a waiter. */
+  list_remove (&lock->elem);
   lock->holder = NULL;
+
+  /* Wake one highest-priority waiter as your sema_up already does. */
+  intr_set_level (old_level);
+
   sema_up (&lock->semaphore);
+
+  /* After potentially waking a higher-priority thread, refresh donations. */
+  thread_refresh_priority ();
 }
 
 /* Returns true if the current thread holds LOCK, false
