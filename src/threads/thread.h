@@ -141,4 +141,9 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
+/* Comparison function for ordering threads by priority (higher priority first).
+   Used by list_insert_ordered() and list_sort() to maintain priority queues. */
+bool thread_priority_less (const struct list_elem *a, const struct list_elem *b,
+                           void *aux);
+
 #endif /* threads/thread.h */

@@ -109,15 +109,29 @@ void
 sema_up (struct semaphore *sema) 
 {
   enum intr_level old_level;
+  bool should_yield = false;
 
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
   if (!list_empty (&sema->waiters)) 
-    thread_unblock (list_entry (list_pop_front (&sema->waiters),
-                                struct thread, elem));
+    {
+      /* Sort waiters by priority and unblock the highest priority thread. */
+      list_sort (&sema->waiters, thread_priority_less, NULL);
+      struct thread *t = list_entry (list_pop_front (&sema->waiters),
+                                     struct thread, elem);
+      thread_unblock (t);
+      
+      /* Check if we should yield to the unblocked thread. */
+      if (!intr_context () && t->priority > thread_current ()->priority)
+        should_yield = true;
+    }
   sema->value++;
   intr_set_level (old_level);
+  
+  /* Yield if necessary. */
+  if (should_yield)
+    thread_yield ();
 }
 
 static void sema_test_helper (void *sema_);
@@ -253,6 +267,20 @@ struct semaphore_elem
     struct semaphore semaphore;         /* This semaphore. */
   };
 
+/* Comparison function for condition variable waiters by priority. */
+static bool
+cond_priority_less (const struct list_elem *a, const struct list_elem *b,
+                    void *aux UNUSED)
+{
+  struct semaphore_elem *sa = list_entry (a, struct semaphore_elem, elem);
+  struct semaphore_elem *sb = list_entry (b, struct semaphore_elem, elem);
+  
+  /* Get the first thread waiting on each semaphore. */
+  const struct list_elem *ea = list_front (&sa->semaphore.waiters);
+  const struct list_elem *eb = list_front (&sb->semaphore.waiters);
+  return thread_priority_less (ea, eb, NULL);
+}
+
 /* Initializes condition variable COND.  A condition variable
    allows one piece of code to signal a condition and cooperating
    code to receive the signal and act upon it. */
@@ -317,8 +345,12 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED)
   ASSERT (lock_held_by_current_thread (lock));
 
   if (!list_empty (&cond->waiters)) 
-    sema_up (&list_entry (list_pop_front (&cond->waiters),
-                          struct semaphore_elem, elem)->semaphore);
+    {
+      /* Sort waiters by priority and signal the highest priority one. */
+      list_sort (&cond->waiters, cond_priority_less, NULL);
+      sema_up (&list_entry (list_pop_front (&cond->waiters),
+                            struct semaphore_elem, elem)->semaphore);
+    }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
