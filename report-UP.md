@@ -1,117 +1,108 @@
 # PintOS - Relatório de Implementação
 
 ## Projeto 2 - User Programs
+> **OBS**: Embora a passagem de argumentos esteja 100% implementada, não consegui concluir a syscall `exit()` e, portanto, nenhum teste desta seção em diante está funcionando. Este relatório reflete mais o meu entendimento exato do que precisa ser implementado no projeto do que o resultado dos meus esforços (individuais) de implementar, pois tive muitas dificuldades com o código.
 
-### 1. Argument Passing
-1.1 userprog/process.c → setup_stack()  
-    1.1.1 Localizar esp = PHYS_BASE  
-    1.1.2 Aplicar hack inicial: `*esp = PHYS_BASE - 12`  
-    1.1.3 Fazer cópia do `file_name` antes de modificá-lo (strtok_r() destrói a string)  
-1.2 Parser completo em setup_stack()  
-    1.2.1 Tokenizar `file_name` usando `strtok_r()` com delimitador espaço  
-    1.2.2 Tratar múltiplos espaços como um (strtok_r() já faz isso)  
-    1.2.3 Impor limite razoável: argumentos devem caber em uma página (4 KB)  
-    1.2.4 Contar `argc` e armazenar cada argumento em vetor local  
-    1.2.5 Alinhar `esp` a múltiplos de 4 bytes (word-align)  
-    1.2.6 Copiar strings da ordem inversa para a pilha (decremento de `esp`)  
-    1.2.7 Empilhar null pointer terminador (para compatibilidade)  
-    1.2.8 Empilhar ponteiros `argv[i]` em ordem reversa  
-    1.2.9 Empilhar ponteiro para `argv`, valor de `argc` e endereço de retorno fake (0)
 
-### 2. Acesso à Memória do Usuário
-2.1 Escolher método de validação  
-    2.1.1 Opção A: verificar validade antes de deferenciar (mais seguro, mais lento)  
-    2.1.2 Opção B: deferenciar e capturar page faults (mais rápido, requer tratamento em exception.c)  
-2.2 userprog/syscall.c → Funções de acesso seguro (Opção B recomendada)  
-    2.2.1 Implementar `get_user(const uint8_t *uaddr)` via assembly (retorna -1 se segfault)  
-    2.2.2 Implementar `put_user(uint8_t *udst, uint8_t byte)` via assembly (retorna false se segfault)  
-    2.2.3 Função `is_user_vaddr(const void *vaddr)` comparando contra `PHYS_BASE`  
-2.3 userprog/exception.c → Modificar page_fault()  
-    2.3.1 Se falta for em endereço de usuário (is_user_vaddr()), setar `eax = 0xffffffff`  
-    2.3.2 Copiar valor antigo de `eip` para `eax` antes de avançar `eip` para next instruction  
-    2.4 userprog/syscall.c → Helpers de cópia segura  
-    2.4.1 `check_address(const void *addr)` valida e mata o processo se inválido  
-    2.4.2 `safe_copy_in(void *dst, const void *src, size_t size)` copia de userspace  
-    2.4.3 `safe_copy_out(void *dst, const void *src, size_t size)` copia para userspace
+### Parte 1 - Carregamento de Processos e Passagem de Argumentos
+#### `userprog/process.c`, `userprog/process.h`
+- Implementado tokenizador de linha de comando `tokenize_arguments` com `strtok_r()`
+- Modificados `process_execute()` e `start_process()` para passar os argumentos separadamente
+- Modificado `setup_stack()` para posicionar argumentos na pilha
 
-### 3. Infraestrutura de System Calls
-3.1 userprog/syscall.c → Inicialização  
-    3.1.1 `syscall_init()`: registrar interrupção 0x30 com `intr_register_int()`  
-    3.1.2 Usar `intr_new()`/`intr_set_level()` para configurar nível de privilégio  
-3.2 userprog/syscall.c → Handler principal  
-    3.2.1 Ler nº da syscall de `*(int *)f->esp` (primeiro argumento na pilha)  
-    3.2.2 Validar que `f->esp` é endereço de usuário com `check_address()`  
-    3.2.3 `switch` baseado no syscall number (definições em lib/syscall-nr.h)  
-    3.2.4 Extrair argumentos da pilha do usuário (próximas posições em esp+4, esp+8, etc.)  
-    3.2.5 Chamar handler apropriado e armazenar retorno em `f->eax`
+#### Design
+1. Thread pai chama `process_execute(exec_string)` :
+    1. Cópia de `exec_string`
+    2. Tokenização com `strtok_r()` na forma de `argc e **argv`
+    3. Invoca thread `start_process()` de nome `argv[0]`.
+2. Em `start_process()`, carrega o executável via `load()`
+3. Cria `intr_frame` e configura a pilha de usuário:
+    1. Ajuste inicial de `esp` para `PHYS_BASE`.
+    2. Cópia inversa dos argumentos para a pilha.
+    3. Alinhamento de stack a múltiplos de 4 bytes.
+    4. Empilhamento de ponteiros `argv[]`, `argc` e endereço de retorno falso.
 
-### 4. Implementação de Syscalls Básicas
-4.1 halt (SYS_HALT)  
-    - userprog/syscall.c → `sys_halt()`  
-    - chamar `shutdown_power_off()` (devices/shutdown.h)  
-    - não retorna; encerra Pintos completamente  
-4.2 exit (SYS_EXIT)  
-    - userprog/syscall.c → `sys_exit(int status)`  
-    - extrair `status` da pilha do usuário via `check_address()`  
-    - imprimir mensagem: `printf("%s: exit(%d)\n", thread_name(), status)`  
-    - armazenar `status` em campo da thread para wait() recuperar  
-    - chamar `thread_exit()`  
-4.3 write (SYS_WRITE)  
-    - userprog/syscall.c → `sys_write(int fd, const void *buffer, unsigned size)`  
-    - suportar somente `fd == 1` (STDOUT_FILENO) inicialmente  
-    - validar `buffer` com `check_address()` para todos os `size` bytes  
-    - para fd == 1: chamar `putbuf(buffer, size)` em uma única chamada  
-    - retornar número de bytes escritos (ou -1 se erro)  
-4.4 Stubs iniciais para syscalls de arquivo  
-    - open (SYS_OPEN) → retornar -1  
-    - close (SYS_CLOSE) → retornar sucesso  
-    - read (SYS_READ) → retornar -1  
-    - filesize (SYS_FILESIZE) → retornar -1  
-    - seek (SYS_SEEK) → sem retorno  
-    - tell (SYS_TELL) → retornar 0  
-    - create (SYS_CREATE) → retornar false  
-    - remove (SYS_REMOVE) → retornar false  
+#### Resultados de Testes
+- ❌ `args-none`: Sem argumentos.
+- ❌ `args-single`: Um argumento.
+- ❌ `args-multiple`: Múltiplos argumentos.
+- ❌ `args-dbl-space`: Espaços duplos tratados corretamente.
 
-### 5. Espera por Processo Filho
-5.1 userprog/process.c → `process_wait(tid_t child_tid)`  
-    5.1.1 Implementação inicial: transformar em `while (true);` (loop infinito)  
-    5.1.2 Garante que Pintos não desligue antes dos processos rodarem  
-5.2 Versão completa  
-    5.2.1 Criar `struct child_info` com campos: `tid`, `exit_status`, `semaphore sema_wait`, `list_elem elem`  
-    5.2.2 Manter lista de filhos em `struct thread`  
-    5.2.3 Em `process_execute()`, registrar filho na lista e copiar seu tid  
-    5.2.4 Em `process_wait()`: procurar filho na lista, fazer `sema_down()` até ele terminar  
-    5.2.5 Em `process_exit()`: procurar pai na lista, chamar `sema_up()` para acordar pai  
-    5.2.6 Retornar -1 se pid não é filho direto ou se já foi aguardado  
-5.3 exec (SYS_EXEC)  
-    - userprog/syscall.c → `sys_exec(const char *cmd_line)`  
-    - validar `cmd_line` pointer com `check_address()`  
-    - chamar `process_execute(cmd_line)`  
-    - retornar pid do novo processo ou -1 se falhar  
-    - **importante**: sincronizar com filho para garantir que executável foi carregado  
-5.4 wait (SYS_WAIT)  
-    - userprog/syscall.c → `sys_wait(pid_t pid)`  
-    - chamar `process_wait(pid)` e retornar status  
+### Parte 2 - Controle de Processos (halt, exit, exec, wait)
+#### `userprog/process.c`, `userprog/syscall.c`, `threads/thread.c`
+- Implementadas funções de syscall: `halt()`, `exit(status)`, `exec(cmd)`, `wait(pid)`
+- Modificada `syscall_handler()` para despachar chamadas de sistema e extrair argumentos da pilha do usuário
+- Adicionada impressão do status de saída em `exit()`
+- Implementada sincronização entre processos pai e filho usando semáforos e variáveis de condição
+- Estruturado gerenciamento de status de saída e comunicação entre threads
 
-### 6. Negar Escrita em Executáveis
-6.1 userprog/process.c → `load()` e `process_execute()`  
-    6.1.1 Após carregar arquivo executável com sucesso, chamar `file_deny_write(file)`  
-    6.1.2 Manter referência aberta ao arquivo enquanto processo está rodando  
-6.2 userprog/process.c → `process_exit()`  
-    6.2.1 Ao finalizar processo, chamar `file_allow_write(executable_file)`  
-    6.2.2 Fechar o arquivo com `file_close()`  
-6.3 userprog/syscall.c → `sys_write()`  
-    6.3.1 Verificar se arquivo aberto em fd é o executável do processo  
-    6.3.2 Se for, retornar 0 (negar escrita)  
-6.4 Testes: programas que tentam sobrescrever seu próprio binário devem falhar silenciosamente
+#### Design
+1. O processo de usuário faz uma chamada de sistema (ex: `exit`, `exec`, `wait`, `halt`)
+2. O handler de syscall (`syscall_handler`) identifica o código da syscall e extrai os argumentos da pilha do usuário
+3. Para `exec`, uma nova thread de usuário é criada, inicializando estruturas de controle de filho e retornando o tid
+4. Para `wait`, o processo pai bloqueia até que o filho termine, usando semáforo/condição para sincronização
+5. Para `exit`, o processo registra o status de saída, imprime a mensagem e libera recursos, sinalizando o pai se necessário
+6. Em caso de erro de validação de ponteiro ou falha de carregamento, a thread termina com `exit(-1)`
 
-### 7. Sincronização de System Calls
-7.1 userprog/syscall.c  
-    7.1.1 Adicionar `static struct lock filesys_lock`  
-    7.1.2 Em `syscall_init()`: inicializar `lock_init(&filesys_lock)`  
-7.2 Proteção do filesystem  
-    7.2.1 Envolver chamadas a `filesys/` (open, close, read, write, etc.) com `lock_acquire()` e `lock_release()`  
-    7.2.2 **Importante**: process_execute() também acessa filesystem → também precisa de proteção  
-7.3 Tratamento de exceções durante críticas  
-    7.3.1 Se process termina enquanto holds lock, liberar antes de chamar thread_exit()
+#### Resultados de Testes
+- ❌ `halt.ck`: Desliga o sistema.
+- ❌ `exit-basic`: Exit básico imprime status.
+- ❌ `exec-multiple`: Execução de múltiplos programas.
+- ❌ `wait-single`/`wait-multiple`: Espera correta de filhos.
 
+### Parte 3 - Interface Geral de Syscalls e Validação de Ponteiros
+#### `userprog/syscall.c`, `lib/kernel/**.c`
+- Implementadas funções auxiliares para validação de ponteiros de usuário (`get_user()`, `verify_user_address()`)
+- Modificada `syscall_handler()` para validar todos os ponteiros antes de acessar memória do usuário
+- Adicionado tratamento de erro para page faults e acessos inválidos, abortando a thread de forma limpa
+- Centralizado o despacho de syscalls em uma tabela de funções
+
+#### Design
+1. Ao receber uma syscall, os argumentos são empacotados a partir de `f->esp` em um array de inteiros
+2. Antes de acessar qualquer argumento ou ponteiro fornecido pelo usuário, chama-se `verify_user_address()` para garantir que o endereço é válido
+3. Se for detectado um ponteiro inválido, a thread termina imediatamente com `exit(-1)`
+4. O dispatcher de syscalls utiliza uma tabela para mapear códigos de syscall para funções específicas
+5. Todos os acessos a buffers de leitura/escrita passam por validação antes de serem utilizados
+
+#### Resultados de Testes
+- ❌ `bad-read`: Syscall com ponteiro de leitura inválido aborta.
+- ❌ `bad-write`: Escrever em área inválida retorna erro.
+- ❌ `boundary-*.ck`: Limites de pilha e data testados.
+
+### Parte 4 - Chamadas de Sistema de Arquivo
+#### `userprog/syscall.c`, `filesys/file.c`, `filesys/inode.c`
+- Implementadas syscalls de arquivos: `create()`, `remove()`, `open()`, `filesize()`, `read()`, `write()`, `seek()`, `tell()`, `close()`
+- Modificada a estrutura de cada thread para manter uma tabela de file descriptors (`struct file_descriptor`)
+- Adicionada sincronização de acesso ao sistema de arquivos usando locks globais
+- Delegadas operações de arquivos para funções do subsistema `filesys`
+
+#### Design
+1. Ao chamar `open()`, o arquivo é aberto e um novo file descriptor único é atribuído à thread, ou retorna -1 em caso de erro
+2. As syscalls `read()` e `write()` validam os buffers de usuário e delegam a leitura/escrita para `file_read()` e `file_write()`
+3. `seek()` e `tell()` manipulam a posição de leitura/escrita do arquivo associado ao file descriptor
+4. `close()` remove o file descriptor da tabela da thread e fecha o arquivo correspondente
+5. Todas as operações de arquivos são protegidas por um lock global para garantir acesso concorrente seguro
+
+#### Resultados de Testes
+- ❌ `create-basic`: Cria e remove arquivos.
+- ❌ `open-basic`: Abertura de arquivos e fd válido.
+- ❌ `read-write`: Leitura e escrita funcionais.
+- ❌ `seek-tell`: Posição de leitura correta.
+- ❌ `close-basic`: Fecha descriptor limpo.
+
+### Parte 5 - Compartilhamento de Descritores e Processos Filhos
+#### `userprog/syscall.c`, `threads/thread.c`, `filesys/file.c`
+- Implementada herança de file descriptors durante `exec()` para processos filhos
+- Adicionada sincronização de acesso concorrente a arquivos com lock global do sistema de arquivos
+- Estruturada lista de gerenciamento de filhos (`child_info`) em cada thread para controle de status e sincronização
+
+#### Design
+1. Ao executar `exec`, a tabela de file descriptors do processo pai é duplicada para o processo filho, permitindo herança de arquivos abertos
+2. Todas as operações de leitura/escrita/fechamento de arquivos utilizam o lock global para evitar condições de corrida
+3. Cada thread mantém uma lista de filhos (`child_info`) com status de término e semáforo para sincronização
+4. O pai pode chamar `wait()` para aguardar o término de um filho específico, liberando o registro após o término
+5. O gerenciamento de recursos garante que file descriptors e estruturas de filhos sejam liberados corretamente ao final do processo
+#### Resultados de Testes
+- ❌ `multi-child-fd`: Filho herda e compartilha fds.
+- ❌ `multi-recurse`: Execuções aninhadas de processos.
+- ❌ `rox-edge`: Acesso simultâneo a arquivos sincrônico.
