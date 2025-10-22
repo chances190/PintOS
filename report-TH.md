@@ -1,15 +1,16 @@
-# PintOS Projeto 1 - Relatório de Implementação
+# PintOS - Relatório de Implementação
 
-## Parte 1: Thread Sleep (Alarm Clock)
+## Projeto 1 - Threads
 
-### Resumo
+### Parte 1: Thread Sleep (Alarm Clock)
+
 Implementação de bloqueio de threads e de um alarme para eliminar o busy-wait em `timer_sleep()`.
 
-### src/threads/thread.h e src/threads/thread.c
+####  src/threads/thread.h e src/threads/thread.c
 - Adicionado o campo `int64_t wake_time` em `struct thread` para armazenar o tick de reativação.  
 - Ajustado `init_thread()` para inicializar `wake_time` com zero.
 
-### src/devices/timer.c
+####  src/devices/timer.c
 - Incluído `lib/kernel/list.h`.  
 - Criada lista estática `sleep_list` para gerenciar threads adormecidas.  
 - Implementada a função de comparação `wake_time_less()`.  
@@ -17,7 +18,7 @@ Implementação de bloqueio de threads e de um alarme para eliminar o busy-wait 
 - Reescrito `timer_sleep()` para usar bloqueio de threads.  
 - Alterado `timer_interrupt()` para acordar threads cujo `wake_time` já passou.
 
-### Design
+####  Design
 
 **Thread Sleep**  
 1. A thread invoca `timer_sleep(ticks)`.  
@@ -37,7 +38,7 @@ Implementação de bloqueio de threads e de um alarme para eliminar o busy-wait 
    - Desbloqueia a thread (adiciona-a à fila de prontos, estado READY).  
 5. Encerra ao encontrar uma thread com `wake_time` futuro.
 
-### Resultados de Testes
+####  Resultados de Testes
 - ✅ `alarm-single`: Funcionamento básico de sono.  
 - ✅ `alarm-multiple`: Suporte a múltiplas threads adormecidas.  
 - ✅ `alarm-simultaneous`: Acordar threads no mesmo tick.  
@@ -45,23 +46,21 @@ Implementação de bloqueio de threads e de um alarme para eliminar o busy-wait 
 - ✅ `alarm-zero`: Dormir por 0 ticks.  
 - ✅ `alarm-negative`: Dormir por ticks negativos.
 
----
-
-## Parte 2.1: Escalonador por Prioridade
+### Parte 2.1: Escalonador por Prioridade
 
 Implementação de escalonamento preemptivo baseado em prioridades.
 
-### src/threads/thread.h e src/threads/thread.c
+####  src/threads/thread.h e src/threads/thread.c
 - Criada a função de comparação `thread_priority_less()`.  
 - Ajustados `thread_unblock()` e `thread_yield()` para inserir threads na `ready_list` em ordem de prioridade.  
 - Acrescentadas verificações de preempção em `thread_create()` e `thread_set_priority()`.
 
-### src/threads/synch.c
+####  src/threads/synch.c
 - Implementada a função de comparação `cond_priority_less()`.  
 - Reescrito `sema_up()` para ordenar `sema->waiters` por prioridade e verificar preempção.  
 - Reescrito `cond_signal()` para sinalizar o waiter de maior prioridade.
 
-### Design
+####  Design
 
 **Criação de Thread**  
 1. `thread_create()` inicializa a nova thread e chama `thread_unblock()`.  
@@ -80,26 +79,24 @@ Implementação de escalonamento preemptivo baseado em prioridades.
 **Mudança de Prioridade**  
 1. `thread_set_priority()` atualiza a prioridade e verifica se deve chamar `thread_yield()`.
 
-### Testes
+####  Testes
 - ✅ `priority-change`: Alteração de prioridade refletida imediatamente.  
 - ✅ `priority-fifo`: Respeito à ordem FIFO entre iguais.  
 - ✅ `priority-preempt`: Preempção imediata ao surgir maior prioridade.  
 - ✅ `priority-sema`: Semáforo acorda o waiter de maior prioridade.  
 - ✅ `priority-condvar`: Condvar sinaliza o waiter de maior prioridade.
 
----
-
-## Parte 2.2: Doação de Prioridade
+### Parte 2.2: Doação de Prioridade
 
 Implementação de doação de prioridade para prevenir inversão.
 
-### src/threads/thread.h e src/threads/thread.c
+####  src/threads/thread.h e src/threads/thread.c
 - Incluídos `int base_priority`, `struct list locks_held` e `struct lock *waiting_on` em `struct thread`.  
 - `init_thread()` agora inicializa `base_priority`, `locks_held` e `waiting_on`.  
 - Criada `thread_refresh_priority()` para recalcular a prioridade efetiva e verificar preempção.  
 - `thread_set_priority()` modificado para alterar `base_priority`.
 
-### src/threads/synch.h e src/threads/synch.c
+####  src/threads/synch.h e src/threads/synch.c
 - Adicionado `struct list_elem elem` em `struct lock` para rastrear `locks_held`.  
 - Implementada `donate_chain()` para doação transitiva.  
 - Reescrito `lock_acquire()`:  
@@ -107,14 +104,14 @@ Implementação de doação de prioridade para prevenir inversão.
   - Após adquirir, limpa `waiting_on`, adiciona o lock em `locks_held` e atualiza `holder`.  
 - Reescrito `lock_release()` para remover o lock de `locks_held` e chamar `thread_refresh_priority()`.
 
-### Design
+####  Design
 1. Cada thread mantém `base_priority`, lista de `locks_held` e o lock `waiting_on`.  
 2. Ao bloquear em lock ocupado, doa prioridade ao holder e propaga pela cadeia `waiting_on`.  
 3. A prioridade efetiva é o máximo entre `base_priority` e as doações de todos os locks em `locks_held`.  
 4. Em `lock_release()`, remove-se a doação associada e recalcula-se a prioridade.  
 5. Após qualquer alteração de prioridade, se houver thread pronta com maior prioridade, ocorre preempção.
 
-### Testes
+####  Testes
 - ✅ `priority-donate-one`: Doação de prioridade simples.  
 - ✅ `priority-donate-multiple`: Doação para múltiplos holders.  
 - ✅ `priority-donate-multiple2`: Múltiplas doações simultâneas.  
@@ -122,3 +119,32 @@ Implementação de doação de prioridade para prevenir inversão.
 - ✅ `priority-donate-sema`: Doação envolvendo semáforos.  
 - ✅ `priority-donate-lower`: Doação de prioridade menor.  
 - ✅ `priority-donate-chain`: Cadeia de doações transitivas.  
+
+---
+
+## Projeto 2 - User Programs
+
+### Parte 1: Carregamento de Processos e Passagem de Argumentos
+- Arquivos: `process.c`, `process.h` (userprog), `syscall.c`  
+- Implementar `process_execute()` e `start_process()`, parser de linha de comando e empilhamento de `argv` e `argc` na pilha do usuário  
+- Testes-alvo: args-none, args-single, args-multiple, args-dbl-space
+
+### Parte 2: Controle de Processos (halt, exit, exec, wait)
+- Syscalls de controle: `halt()`, `exit(int)`, `exec(const char*)`, `wait(pid_t)`  
+- Integração com `syscall_handler()`  
+- Testes-alvo: halt.ck, exit.ck, exec-*.ck, wait-*.ck
+
+### Parte 3: Interface Geral de Syscalls e Validação de Ponteiros
+- Implementar _dispatcher_ em `syscall_handler()`  
+- Validar endereços de usuário em cada syscall (`get_user()`, `verify_user_address()`)  
+- Testar condições de falha (page fault): bad-jump.ck, bad-read*.ck, bad-write*.ck, boundary-*.ck, sc-*.ck
+
+### Parte 4: Chamadas de Sistema de Arquivo
+- Syscalls: `create()`, `remove()`, `open()`, `filesize()`, `read()`, `write()`, `seek()`, `tell()`, `close()`  
+- Manter tabela de file descriptors por thread  
+- Testes-alvo: create-*.ck, open-*.ck, read-*.ck, write-*.ck, close-*.ck
+
+### Parte 5: Compartilhamento de Descritores e Processos Filhos
+- Herança de FD na criação de filhos  
+- Sincronização de acesso concorrente a arquivos  
+- Testes-alvo: multi-child-fd.ck, multi-recurse.ck, rox-*.ck  
