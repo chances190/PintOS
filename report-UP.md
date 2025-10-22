@@ -6,27 +6,28 @@
 
 ### Parte 1 - Carregamento de Processos e Passagem de Argumentos
 #### `userprog/process.c`, `userprog/process.h`
-- Implementado tokenizador de linha de comando `tokenize_arguments` com `strtok_r()`
-- Modificados `process_execute()` e `start_process()` para passar os argumentos separadamente
+- Modificados `process_execute()` e `load()` para extrair filename do comando do processo
+- Implementado parsing de linha de comando em `setup_stack()` com `strtok_r()`
 - Modificado `setup_stack()` para posicionar argumentos na pilha
 
 #### Design
-1. Thread pai chama `process_execute(exec_string)` :
-    1. Cópia de `exec_string`
-    2. Tokenização com `strtok_r()` na forma de `argc e **argv`
-    3. Invoca thread `start_process()` de nome `argv[0]`.
-2. Em `start_process()`, carrega o executável via `load()`
-3. Cria `intr_frame` e configura a pilha de usuário:
-    1. Ajuste inicial de `esp` para `PHYS_BASE`.
-    2. Cópia inversa dos argumentos para a pilha.
-    3. Alinhamento de stack a múltiplos de 4 bytes.
-    4. Empilhamento de ponteiros `argv[]`, `argc` e endereço de retorno falso.
+1. Thread pai chama `process_execute(exec_string)`:
+    1. Cópia de `exec_string` completa
+    2. Extração do `filename` (primeiro token) usando `strcspn()`
+    3. Invoca thread `start_process()` de nome `filename`, passando `exec_string` completa como argumento
+2. Em `start_process()`, carrega o executável via `load(exec_string)`
+3. Em `load()`, extrai novamente `filename` e abre o executável
+4. Chama `setup_stack(exec_string, &esp)` que configura a pilha de usuário:
+    1. Copia `exec_string` inteira para o topo da pilha
+    2. Tokeniza in-place com `strtok_r()` e coleta ponteiros `argv[]`
+    3. Alinhamento de stack a múltiplos de 4 bytes
+    4. Empilhamento de NULL terminator, ponteiros `argv[]`, `argc` e endereço de retorno falso
 
 #### Resultados de Testes
-- ❌ `args-none`: Sem argumentos.
-- ❌ `args-single`: Um argumento.
-- ❌ `args-multiple`: Múltiplos argumentos.
-- ❌ `args-dbl-space`: Espaços duplos tratados corretamente.
+- ✅ `args-none`: Sem argumentos.
+- ✅ `args-single`: Um argumento.
+- ✅ `args-multiple`: Múltiplos argumentos.
+- ✅ `args-dbl-space`: Espaços duplos tratados corretamente.
 
 ### Parte 2 - Controle de Processos (halt, exit, exec, wait)
 #### `userprog/process.c`, `userprog/syscall.c`, `threads/thread.c`
