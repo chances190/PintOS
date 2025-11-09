@@ -24,10 +24,12 @@
     4. Empilhamento de NULL terminator, ponteiros `argv[]`, `argc` e endereço de retorno falso
 
 #### Resultados de Testes
-- ✅ `args-none`: Sem argumentos.
-- ✅ `args-single`: Um argumento.
-- ✅ `args-multiple`: Múltiplos argumentos.
-- ✅ `args-dbl-space`: Espaços duplos tratados corretamente.
+#### Resultados de Testes
+- ✅ `userprog/args-none`: Sem argumentos — testa a execução de um programa sem parâmetros.
+- ✅ `userprog/args-single`: Um argumento — valida passagem e leitura de um único argumento.
+- ✅ `userprog/args-multiple`: Múltiplos argumentos — verifica parsing e empilhamento de vários argumentos.
+- ✅ `userprog/args-many`: Muitos argumentos — testa limites do número de argumentos aceitos pela pilha.
+- ✅ `userprog/args-dbl-space`: Espaços duplos tratados corretamente — garante que espaços extras não criem argumentos vazios.
 
 ### Parte 2 - Controle de Processos (halt, exit, exec, wait)
 #### `userprog/process.c`, `userprog/syscall.c`, `threads/thread.c`
@@ -46,10 +48,22 @@
 6. Em caso de erro de validação de ponteiro ou falha de carregamento, a thread termina com `exit(-1)`
 
 #### Resultados de Testes
-- ❌ `halt.ck`: Desliga o sistema.
-- ❌ `exit-basic`: Exit básico imprime status.
-- ❌ `exec-multiple`: Execução de múltiplos programas.
-- ❌ `wait-single`/`wait-multiple`: Espera correta de filhos.
+- ✅ `userprog/halt`: Desliga o sistema — testa se a syscall de desligamento encerra corretamente o kernel.
+- ❌ `userprog/exit`: Exit básico imprime status — valida que o processo finaliza e reporta o status de saída.
+
+- ❌ `userprog/exec-once`: Execução simples de um processo — carrega e executa um único programa.
+- ❌ `userprog/exec-arg`: Exec com argumentos — testa se `exec()` aceita e passa a string de comando corretamente.
+- ❌ `userprog/exec-bound`: Exec com argumento no limite de tamanho — verifica limites de tamanho do comando.
+- ❌ `userprog/exec-bound-2`: Variante de limite de `exec()` — testa limites de buffer/heap ao executar.
+- ❌ `userprog/exec-bound-3`: Outra variante de limite de `exec()` — casos fronteira adicionais de `exec()`.
+- ❌ `userprog/exec-multiple`: Execução de múltiplos programas — cria vários filhos sequencialmente/paralelamente.
+- ❌ `userprog/exec-missing`: Exec de programa ausente — `exec()` deve falhar e retornar erro/indicar falha.
+- ❌ `userprog/exec-bad-ptr`: `exec()` com ponteiro inválido — validações de ponteiro causam `exit(-1)`.
+
+- ❌ `userprog/wait-simple`: `wait()` em um filho simples — pai aguarda término e recebe status.
+- ❌ `userprog/wait-twice`: `wait()` é chamado duas vezes no mesmo filho — testa comportamento e retornos.
+- ❌ `userprog/wait-killed`: Espera por filho que foi morto — verifica notificação e status.
+- ❌ `userprog/wait-bad-pid`: `wait()` com pid inválido — testa erro no argumento de `wait()`.
 
 ### Parte 3 - Interface Geral de Syscalls e Validação de Ponteiros
 #### `userprog/syscall.c`, `lib/kernel/**.c`
@@ -66,9 +80,19 @@
 5. Todos os acessos a buffers de leitura/escrita passam por validação antes de serem utilizados
 
 #### Resultados de Testes
-- ❌ `bad-read`: Syscall com ponteiro de leitura inválido aborta.
-- ❌ `bad-write`: Escrever em área inválida retorna erro.
-- ❌ `boundary-*.ck`: Limites de pilha e data testados.
+#### Resultados de Testes
+- ❌ `userprog/sc-bad-sp`: Stack pointer inválido em syscall — testa detecção de SP fora dos limites.
+- ❌ `userprog/sc-bad-arg`: Argumento inválido em syscall — valida checagem de ponteiros de argumento.
+- ❌ `userprog/sc-boundary`: Syscall no limite da pilha (1) — teste de caso fronteira da pilha (implementado/testado conforme nota).
+- ❌ `userprog/sc-boundary-2`: Syscall no limite da pilha (2) — segunda variante de fronteira de SP.
+- ❌ `userprog/sc-boundary-3`: Syscall no limite da pilha (3) — terceira variante de fronteira de SP.
+
+- ❌ `userprog/bad-read`: `read()` com ponteiro inválido — garante que leituras em endereços inválidos abortem o processo.
+- ❌ `userprog/bad-write`: `write()` com ponteiro inválido — valida proteção contra gravações em memória não mapeada.
+- ❌ `userprog/bad-read2`: Segunda variante de `bad-read` — casos adicionais de ponteiro de leitura inválido.
+- ❌ `userprog/bad-write2`: Segunda variante de `bad-write` — casos adicionais de ponteiro de escrita inválido.
+- ❌ `userprog/bad-jump`: Salto para endereço inválido — testa proteção contra saltos para código não mapeado.
+- ❌ `userprog/bad-jump2`: Outra variante de salto inválido — caso fronteira de execução insegura.
 
 ### Parte 4 - Chamadas de Sistema de Arquivo
 #### `userprog/syscall.c`, `filesys/file.c`, `filesys/inode.c`
@@ -85,11 +109,55 @@
 5. Todas as operações de arquivos são protegidas por um lock global para garantir acesso concorrente seguro
 
 #### Resultados de Testes
-- ❌ `create-basic`: Cria e remove arquivos.
-- ❌ `open-basic`: Abertura de arquivos e fd válido.
-- ❌ `read-write`: Leitura e escrita funcionais.
-- ❌ `seek-tell`: Posição de leitura correta.
-- ❌ `close-basic`: Fecha descriptor limpo.
+- ❌ `userprog/create-normal`: Criação normal de arquivo — testa `create()` com nome válido e tamanho.
+- ❌ `userprog/create-empty`: `create()` com nome vazio — verifica comportamento para nomes inválidos/vazios.
+- ❌ `userprog/create-null`: `create()` com ponteiro NULL — valida checagem de ponteiro de nome.
+- ❌ `userprog/create-bad-ptr`: `create()` com ponteiro inválido — deve causar `exit(-1)`.
+- ❌ `userprog/create-long`: Nome muito longo em `create()` — testa limites de comprimento de nome.
+- ❌ `userprog/create-exists`: Criar arquivo que já existe — deve falhar graciosamente.
+- ❌ `userprog/create-bound`: Casos fronteira de `create()` — limites e alinhamentos.
+
+- ❌ `userprog/open-normal`: Abertura normal de arquivo — `open()` retorna fd válido.
+- ❌ `userprog/open-missing`: `open()` de arquivo não existente — retorna erro (-1).
+- ❌ `userprog/open-boundary`: Abertura em caso fronteira — testes de limites de nome/pointer.
+- ❌ `userprog/open-empty`: `open()` com nome vazio — valida checagem de argumento.
+- ❌ `userprog/open-null`: `open()` com ponteiro NULL — proteção contra ponteiros inválidos.
+- ❌ `userprog/open-bad-ptr`: `open()` com ponteiro inválido — deve abortar o processo.
+- ❌ `userprog/open-twice`: Abrir o mesmo arquivo duas vezes — verifica fd distinto ou compartilhamento.
+
+- ❌ `userprog/close-normal`: Fechar fd válido — `close()` libera descriptor.
+- ❌ `userprog/close-twice`: Fechar duas vezes o mesmo fd — verfifica falha/segurança.
+- ❌ `userprog/close-stdin`: Tentar fechar STDIN — teste de proteção para descritores reservados.
+- ❌ `userprog/close-stdout`: Tentar fechar STDOUT — teste de proteção para descritores reservados.
+- ❌ `userprog/close-bad-fd`: `close()` com fd inválido — deve retornar erro.
+
+- ❌ `userprog/read-normal`: Leitura de arquivo normal — `read()` retorna bytes corretos.
+- ❌ `userprog/read-bad-ptr`: `read()` com buffer inválido — valida checagem de ponteiro de usuário.
+- ❌ `userprog/read-boundary`: `read()` em limites de buffer/pilha — casos fronteira.
+- ❌ `userprog/read-zero`: `read()` com tamanho zero — deveria retornar 0 sem erro.
+- ❌ `userprog/read-stdout`: `read()` de STDOUT — teste de comportamento em descritores não-leitura.
+- ❌ `userprog/read-bad-fd`: `read()` com fd inválido — deve retornar erro.
+
+- ❌ `userprog/write-normal`: Escrita normal — `write()` grava e retorna número de bytes.
+- ❌ `userprog/write-bad-ptr`: `write()` com buffer inválido — valida proteção de ponteiros de usuário.
+- ❌ `userprog/write-boundary`: `write()` em limites de buffer/pilha — casos fronteira.
+- ❌ `userprog/write-zero`: `write()` com tamanho zero — deve retornar 0 sem erro.
+- ✅ `userprog/write-stdin`: `write()` em STDIN — teste de comportamento em descritor não-escrita.
+- ✅ `userprog/write-bad-fd`: `write()` com fd inválido — valida retorno de erro para fd incorreto.
+
+- ❌ `filesys/base/lg-create`: Teste de carga grande para `create()` — cria muitos arquivos para estressar FS.
+- ❌ `filesys/base/lg-full`: Criação até encher FS — testa condição de disco cheio.
+- ❌ `filesys/base/lg-random`: Teste aleatório de criação/leitura/escrita grande.
+- ❌ `filesys/base/lg-seq-block`: Leitura sequencial com blocos grandes.
+- ❌ `filesys/base/lg-seq-random`: Leitura sequencial com padrões aleatórios.
+- ❌ `filesys/base/sm-create`: Testes pequenos de criação e remoção.
+- ❌ `filesys/base/sm-full`: Pequenas criações até encher espaço — caso de encher FS em pequeno cenário.
+- ❌ `filesys/base/sm-random`: Testes aleatórios pequenos.
+- ❌ `filesys/base/sm-seq-block`: Leitura/escrita sequencial em blocos pequenos.
+- ❌ `filesys/base/sm-seq-random`: Sequência com padrões aleatórios em pequeno cenário.
+- ❌ `filesys/base/syn-read`: Leitura sincronizada concorrente — testa locks de FS.
+- ❌ `filesys/base/syn-remove`: Remoção concorrente de arquivos — sincronização e segurança.
+- ❌ `filesys/base/syn-write`: Escrita concorrente no mesmo arquivo — valida locks e atomicidade.
 
 ### Parte 5 - Compartilhamento de Descritores e Processos Filhos
 #### `userprog/syscall.c`, `threads/thread.c`, `filesys/file.c`
@@ -103,7 +171,18 @@
 3. Cada thread mantém uma lista de filhos (`child_info`) com status de término e semáforo para sincronização
 4. O pai pode chamar `wait()` para aguardar o término de um filho específico, liberando o registro após o término
 5. O gerenciamento de recursos garante que file descriptors e estruturas de filhos sejam liberados corretamente ao final do processo
+
 #### Resultados de Testes
-- ❌ `multi-child-fd`: Filho herda e compartilha fds.
-- ❌ `multi-recurse`: Execuções aninhadas de processos.
-- ❌ `rox-edge`: Acesso simultâneo a arquivos sincrônico.
+- ❌ `userprog/multi-recurse`: Execuções aninhadas de processos — testa `exec()` recursivo e empilhamento de processos.
+- ❌ `userprog/multi-child-fd`: Filho herda e compartilha fds — verifica herança e concorrência em arquivos abertos.
+- ❌ `userprog/rox-simple`: Regiões de sobreposição (rox) simples — testa concorrência/locks em operações sobrepostas.
+- ❌ `userprog/rox-child`: Variante com filho — rox com múltiplos processos acessando o mesmo arquivo.
+- ❌ `userprog/rox-multichild`: Variante multi-filho — testa contenção e sincronização entre muitos filhos.
+
+- ❌ `userprog/exec-multiple`: Execução de múltiplos programas (listada também na Parte 2) — testes de criação e término de vários filhos.
+- ❌ `userprog/multi-recurse`: (duplicado) Execuções aninhadas — reforça casos de recursão em `exec()`.
+
+- ❌ `userprog/wait-simple`: Espera por filho simples — sincronização pai/filho.
+- ❌ `userprog/wait-twice`: Espera duplicada pelo mesmo filho — comportamento ante múltiplas chamadas `wait()`.
+- ❌ `userprog/wait-killed`: Espera por filho que foi morto — caso de sinalização e status de término.
+- ❌ `userprog/wait-bad-pid`: `wait()` com PID inválido — valida retorno de erro.
