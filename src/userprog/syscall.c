@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <syscall-nr.h>
 #include <console.h> /* putbuf for console writes */
+#include <debug.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
@@ -28,6 +29,7 @@ static int syscall_write(int fd, const void *buffer, unsigned length);
 static void syscall_seek(int fd, unsigned position);
 static unsigned syscall_tell(int fd);
 static void syscall_close(int fd);
+
 static mapid_t syscall_mmap(int fd, void *addr);
 static void syscall_munmap(mapid_t mapping);
 static bool syscall_chdir(const char *dir);
@@ -407,22 +409,45 @@ syscall_halt(void)
 static void
 syscall_exit(int status)
 {
-    printf("%s: exit(%d)\n", thread_current()->name, status);
-    thread_exit(); // TODO: Pass status
+  struct thread *cur = thread_current ();
+  DEBUG_PRINT("[syscall_exit] tid=%d exiting with status %d\n", cur->tid, status);
+  cur->exec_status->exit_status = status;
+  printf("%s: exit(%d)\n", cur->name, status);
+  thread_exit();
 }
 
 static pid_t
 syscall_exec(const char *file)
 {
-    printf("syscall_exec not yet implemented\n");
-    return (pid_t)-1;
+  char kernel_file[255]; // TODO: Malloc this instead
+  
+  DEBUG_PRINT("[syscall_exec] Executing '%s'\n", file);
+  
+  /* Copy the filename string from user space. */
+  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  {
+    DEBUG_PRINT("[syscall_exec] Invalid filename pointer\n");
+    return PID_ERROR;
+  }
+  
+  /* Check for empty filename. */
+  if (kernel_file[0] == '\0')
+  {
+    DEBUG_PRINT("[syscall_exec] Empty filename\n");
+    return PID_ERROR;
+  }
+  
+  /* Execute the new process. */
+  pid_t pid = process_execute(kernel_file);
+  DEBUG_PRINT("[syscall_exec] process_execute returned pid=%d\n", pid);
+  
+  return pid;
 }
 
 static int
 syscall_wait(pid_t pid)
 {
-    printf("syscall_wait not yet implemented\n");
-    return -1;
+    return process_wait(pid);
 }
 
 static bool

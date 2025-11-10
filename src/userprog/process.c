@@ -15,82 +15,154 @@
 #include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *exec_string, void (**eip) (void), void **esp);
 
+struct start_process_args 
+{
+  char *exec_string;
+  struct process_exec_status *child_stat;
+};
+
 /* Starts a new thread running a user program loaded with
    EXEC_STRING. The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
-   thread id, or TID_ERROR if the thread cannot be created. */
-tid_t
+   thread id, or PID_ERROR if the thread cannot be created. */
+pid_t
 process_execute (const char *exec_string) 
 {
   char *exec_string_cp = NULL, *filename = NULL;
   size_t fn_len;
   tid_t tid;
+  struct thread *cur = thread_current ();
+  struct thread *child;
+  struct process_exec_status *child_stat;
 
-  /* Make a copy of EXEC_STRING.
-     Otherwise there's a race between the caller and load(). */
-  exec_string_cp = palloc_get_page (0);
-  if (exec_string_cp == NULL) goto fail;
-  strlcpy (exec_string_cp, exec_string, PGSIZE);
-
-  /* Make a copy of FILE_NAME
+  /* Make a copy of FILE_NAME for the child process
   (first token before space) */
   filename = palloc_get_page (0);
-  if (filename == NULL) goto fail;
-  fn_len = strcspn(exec_string_cp, " ");
-  strlcpy(filename, exec_string_cp, fn_len + 1);
+  if (filename == NULL) return TID_ERROR;
+  fn_len = strcspn(exec_string, " ");
+  if (fn_len >= PGSIZE) fn_len = PGSIZE - 1;
+  strlcpy(filename, exec_string, fn_len + 1);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (filename, PRI_DEFAULT, start_process, exec_string_cp);
-  if (tid == TID_ERROR) goto fail;
+  /* Make a copy of EXEC_STRING for the child process */
+  exec_string_cp = palloc_get_page (0);
+  if (exec_string_cp == NULL)
+  {
+    palloc_free_page(filename);
+    return PID_ERROR;
+  }
+  strlcpy (exec_string_cp, exec_string, PGSIZE);
 
-  return tid;
+  /* Create a CHILD_STATUS struct for the child process. */
+  DEBUG_PRINT("[process_execute] Creating child status\n");
+  child_stat = malloc(sizeof(struct process_exec_status));
+  if (child_stat == NULL)
+  {
+    palloc_free_page(filename);
+    palloc_free_page(exec_string_cp);
+    return PID_ERROR;
+  }
+  child_stat->pid = PID_ERROR;  /* Will be set after thread_create. */
+  child_stat->exit_status = -1;
+  child_stat->has_exited = false;
+  child_stat->waited_on = false;
+  child_stat->orphan = false;
+  sema_init(&child_stat->wait_sema, 0);
+  lock_init(&child_stat->lock);
+  
+  /* Pack the arguments of start_process into a struct*/
+  struct start_process_args *args = malloc(sizeof(struct start_process_args));
+  if (args == NULL) {
+    free(child_stat);
+    palloc_free_page(filename);
+    palloc_free_page(exec_string_cp);
+    return PID_ERROR;
+  }
+  args->exec_string = exec_string_cp;
+  args->child_stat = child_stat;
+  
+  /* Create a new thread to execute FILENAME. */
+  DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", filename);
+  tid = thread_create(filename, PRI_DEFAULT, start_process, args);
+  palloc_free_page(filename);
+  if (tid == TID_ERROR) 
+  {
+    DEBUG_PRINT("[process_execute] thread_create failed\n");
+    free(child_stat);
+    palloc_free_page(exec_string_cp);
+    free(args);
+    return PID_ERROR;
+  }
+  DEBUG_PRINT("[process_execute] Thread created with tid=%d\n", tid);
+  list_push_back(&cur->children, &child_stat->elem);
+  
+  /* Wait for child to finish loading. */
+  DEBUG_PRINT("[process_execute] Waiting for child to load...\n");
+  sema_down (&child_stat->wait_sema);
 
-  fail:
-    if (exec_string_cp != NULL) palloc_free_page(exec_string_cp);
-    if (filename != NULL) palloc_free_page(filename);
-    return TID_ERROR;
+  if (child_stat->has_exited && child_stat->exit_status == -1)
+  {
+    DEBUG_PRINT("[process_execute] Load failed\n");
+    return PID_ERROR;
+  }
+
+  DEBUG_PRINT("[process_execute] Load completed. Returning pid=%d\n", tid);
+  return (pid_t) tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *exec_string_)
+start_process (void *args_)
 {
-  char *exec_string = exec_string_;
+  struct start_process_args *args = args_;
+  char *exec_string = args->exec_string;
+  struct process_exec_status *child_stat = args->child_stat;
+  
   struct intr_frame if_;
   bool success;
+  
+  struct thread *cur = thread_current ();
+  cur->exec_status = child_stat;
+  cur->exec_status->pid = cur->tid;
+
+  DEBUG_PRINT("[start_process] tid=%d starting, exec_string='%s'\n", cur->tid, exec_string);
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
+  
+  DEBUG_PRINT("[start_process] Calling load()...\n");
   success = load (exec_string, &if_.eip, &if_.esp);
-
-  // DEBUG
-  // {
-  //   /* Extract argc and argv from the user stack frame for debugging */
-  //   uint32_t *stack_u32 = (uint32_t *) if_.esp;
-  //   int debug_argc = (int) stack_u32[1];
-  //   char **debug_argv = (char **) stack_u32[2];
-
-  //   printf("DEBUG: argc = %d\n", debug_argc);
-  //   for (int i = 0; i <= debug_argc; i++) {
-  //     printf("DEBUG: argv[%d] = %s\n", i, debug_argv[i]);
-  //   }
-  // }
-
-  /* If load failed, quit. */
+  DEBUG_PRINT("[start_process] load() returned %d\n", success);
   palloc_free_page (exec_string);
-  if (!success) 
+  free(args);
+  
+  if (!success)
+  {
+    /* Load failed - mark as exited with -1. */
+    cur->exec_status->has_exited = true;
+    cur->exec_status->exit_status = -1;
+  }
+  
+  DEBUG_PRINT("[start_process] Signaling parent (sema_up on wait_sema)\n");
+  sema_up (&cur->exec_status->wait_sema);
+  
+  if (!success)
+  {
+    DEBUG_PRINT("[start_process] Load failed, exiting with status -1\n");
     thread_exit ();
+  }
 
+  DEBUG_PRINT("[start_process] Jumping to user mode...\n");
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -111,15 +183,53 @@ start_process (void *exec_string_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (pid_t child_tid) 
 {
-  int i;
-  for (i=0 ; i<1000 ; i++)
+  struct thread *cur = thread_current ();
+  struct process_exec_status *child_stat = NULL;
+  struct list_elem *e;
+  int exit_status;
+  bool should_wait;
+  
+  DEBUG_PRINT("[process_wait] tid=%d waiting for child_tid=%d\n", cur->tid, child_tid);
+  
+  /* Find the process_exec_status with the given TID. */
+  for (e = list_begin (&cur->children); e != list_end (&cur->children);
+       e = list_next (e))
   {
-    thread_yield (); // Busy-wait on the main kernel thread
+    struct process_exec_status *cs = list_entry (e, struct process_exec_status, elem);
+    if (cs->pid == child_tid)
+    {
+      child_stat = cs;
+      break;
+    }
   }
-
-  return 0; // FIXME: Just waiting a bit as a gambiarra
+  
+  /* Return -1 if no such child. */
+  if (child_stat == NULL)
+  {
+    DEBUG_PRINT("[process_wait] Child not found, returning -1\n");
+    return -1;
+  }
+  
+  /* Check if already waited on this child. */
+  if (child_stat->waited_on)
+  {
+    DEBUG_PRINT("[process_wait] Already waited on this child, returning -1\n");
+    return -1;
+  }
+  
+  /* Mark as waited on and wait unconditionally. */
+  DEBUG_PRINT("[process_wait] Waiting for child to exit (sema_down on wait_sema)...\n");
+  child_stat->waited_on = true;
+  sema_down (&child_stat->wait_sema);
+  
+  exit_status = child_stat->exit_status;  
+  list_remove (&child_stat->elem);
+  free(child_stat);
+  
+  DEBUG_PRINT("[process_wait] Child exited with status %d\n", exit_status);
+  return exit_status;
 }
 
 /* Free the current process's resources. */
@@ -128,6 +238,44 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+  struct process_exec_status *my_status = cur->exec_status;
+  ASSERT (my_status != NULL);
+
+  DEBUG_PRINT("[process_exit] tid=%d exiting\n", cur->tid);
+
+  /* Lock REQUIRED: both parent and child 
+     access orphan/has_exited to decide who frees. */
+  lock_acquire(&my_status->lock);
+  my_status->has_exited = true;
+  bool orphan = my_status->orphan;
+  lock_release(&my_status->lock);
+  
+  DEBUG_PRINT("[process_exit] %s\n", orphan
+              ? "Parent gone, will free process_exec_status"
+              : "Signaling parent (sema_up on wait_sema)");
+  
+  if (orphan) free(my_status); /* Parent is gone. We own this structure now. */
+  else sema_up(&my_status->wait_sema); /* Parent is waiting. Signal it. */
+
+
+  while (!list_empty(&cur->children))
+  {
+    struct list_elem *e = list_pop_front(&cur->children);
+    struct process_exec_status *cs = list_entry(e, struct process_exec_status, elem);
+    
+    /* Lock REQUIRED: both parent and child access 
+       orphan/has_exited to decide who frees. */
+    lock_acquire(&cs->lock);
+    cs->orphan = true;
+    bool should_free_child = cs->has_exited;
+    lock_release(&cs->lock);
+    
+    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", cs->pid, should_free_child
+                ? "already exited, will free its process_exec_status"
+                : "still running, marking as orphaned");
+    
+    if (should_free_child) free(cs);
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */

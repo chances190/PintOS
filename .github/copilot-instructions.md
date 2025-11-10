@@ -45,12 +45,6 @@
    cd src/<phase>
    make check          # Runs ALL tests, takes 60-480 seconds depending on phase
    ```
-   
-   OR run individual test:
-   ```bash
-   cd src/<phase>
-   make test TEST=<test-name>  # e.g., TEST=alarm-single
-   ```
 
 ### Known Issues
 
@@ -189,8 +183,8 @@ Each functionality section must contain:
 4. **Build and test**:
    ```bash
    cd src/<phase>
-   make clean && make  # Full rebuild
-   make check          # OR make check TEST=<test-name>
+   make clean
+   make check
    ```
 
 5. **Analyze test results**:
