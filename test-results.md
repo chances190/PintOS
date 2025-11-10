@@ -48,8 +48,8 @@
 | 12  | `userprog/exit`              |      ✅       |    ✅    |
 | 13  | `userprog/create-normal`     |      ✅       |    ✅    |
 | 14  | `userprog/create-empty`      |      ✅       |    ✅    |
-| 15  | `userprog/create-null`       |      ❌       |    ❌    |
-| 16  | `userprog/create-bad-ptr`    |      ❌       |    ❌    |
+| 15  | `userprog/create-null`       |      ✅       |    ✅    |
+| 16  | `userprog/create-bad-ptr`    |      ✅       |    ✅    |
 | 17  | `userprog/create-long`       |      ✅       |    ✅    |
 | 18  | `userprog/create-exists`     |      ✅       |    ✅    |
 | 19  | `userprog/create-bound`      |      ✅       |    ✅    |
@@ -58,7 +58,7 @@
 | 22  | `userprog/open-boundary`     |      ✅       |    ✅    |
 | 23  | `userprog/open-empty`        |      ✅       |    ✅    |
 | 24  | `userprog/open-null`         |      ✅       |    ✅    |
-| 25  | `userprog/open-bad-ptr`      |      ❌       |    ❌    |
+| 25  | `userprog/open-bad-ptr`      |      ✅       |    ✅    |
 | 26  | `userprog/open-twice`        |      ✅       |    ✅    |
 | 27  | `userprog/close-normal`      |      ✅       |    ✅    |
 | 28  | `userprog/close-twice`       |      ✅       |    ✅    |
@@ -66,13 +66,13 @@
 | 30  | `userprog/close-stdout`      |      ✅       |    ✅    |
 | 31  | `userprog/close-bad-fd`      |      ✅       |    ✅    |
 | 32  | `userprog/read-normal`       |      ✅       |    ✅    |
-| 33  | `userprog/read-bad-ptr`      |      ❌       |    ❌    |
+| 33  | `userprog/read-bad-ptr`      |      ✅       |    ✅    |
 | 34  | `userprog/read-boundary`     |      ✅       |    ✅    |
 | 35  | `userprog/read-zero`         |      ✅       |    ✅    |
 | 36  | `userprog/read-stdout`       |      ✅       |    ✅    |
 | 37  | `userprog/read-bad-fd`       |      ✅       |    ✅    |
 | 38  | `userprog/write-normal`      |      ✅       |    ✅    |
-| 39  | `userprog/write-bad-ptr`     |      ❌       |    ❌    |
+| 39  | `userprog/write-bad-ptr`     |      ✅       |    ✅    |
 | 40  | `userprog/write-boundary`    |      ✅       |    ✅    |
 | 41  | `userprog/write-zero`        |      ✅       |    ✅    |
 | 42  | `userprog/write-stdin`       |      ✅       |    ✅    |
@@ -81,9 +81,9 @@
 | 45  | `userprog/exec-arg`          |      ✅       |    ✅    |
 | 46  | `userprog/exec-bound`        |      ✅       |    ✅    |
 | 47  | `userprog/exec-bound-2`      |      ✅       |    ✅    |
-| 48  | `userprog/exec-bound-3`      |      ✅       |    ❌    |
+| 48  | `userprog/exec-bound-3`      |      ✅       |    ✅    |
 | 49  | `userprog/exec-multiple`     |      ✅       |    ✅    |
-| 50  | `userprog/exec-missing`      |      ❌       |    ❌    |
+| 50  | `userprog/exec-missing`      |      ✅       |    ✅    |
 | 51  | `userprog/exec-bad-ptr`      |      ✅       |    ✅    |
 | 52  | `userprog/wait-simple`       |      ✅       |    ✅    |
 | 53  | `userprog/wait-twice`        |      ✅       |    ✅    |
@@ -100,7 +100,7 @@
 | 64  | `userprog/bad-write2`        |      ❌       |    ❌    |
 | 65  | `userprog/bad-jump`          |      ❌       |    ❌    |
 | 66  | `userprog/bad-jump2`         |      ❌       |    ❌    |
-| 67  | `userprog/no-vm/multi-oom`   |      ❌       |    ❌    |
+| 67  | `userprog/no-vm/multi-oom`   |      ✅       |    ✅    |
 | 68  | `filesys/base/lg-create`     |      ✅       |    ✅    |
 | 69  | `filesys/base/lg-full`       |      ✅       |    ✅    |
 | 70  | `filesys/base/lg-random`     |      ✅       |    ✅    |

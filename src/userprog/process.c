@@ -147,6 +147,7 @@ start_process (void *args_)
   if (!success)
   {
     /* Load failed - mark as exited with -1. */
+    cur->exec_status->pid = PID_ERROR;
     cur->exec_status->has_exited = true;
     cur->exec_status->exit_status = -1;
   }

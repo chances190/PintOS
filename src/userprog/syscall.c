@@ -6,6 +6,7 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #include "threads/synch.h"
 #include "userprog/process.h"
 #include "userprog/fdtable.h"
@@ -307,6 +308,9 @@ _get_byte_from_user (uint8_t *kernel_dst, const uint8_t *user_src)
 static bool
 memcpy_from_user (void *kernel_dst, const void *user_src, size_t size)
 {
+  if (size == 0) return true;
+  if (user_src == NULL) return false;
+  
   uint8_t *dst = kernel_dst;
   const uint8_t *src = user_src;
 
@@ -330,6 +334,9 @@ memcpy_from_user (void *kernel_dst, const void *user_src, size_t size)
 static bool
 strncpy_from_user (char *kernel_dst, void *user_src, size_t max_len)
 {
+  if (max_len == 0) return true;
+  if (user_src == NULL) return false;
+  
   size_t i;
   for (i = 0; i < max_len; i++) 
   {
@@ -366,6 +373,8 @@ _put_byte_to_user (uint8_t *user_dst, uint8_t byte)
 static bool
 memcpy_to_user(void *user_dst, const void *kernel_src, size_t size)
 {
+  if (size == 0) return true;
+
   uint8_t *dst = user_dst;
   const uint8_t *src = kernel_src;
 
@@ -389,8 +398,7 @@ memcpy_to_user(void *user_dst, const void *kernel_src, size_t size)
 static bool
 strncpy_to_user(void *user_dst, const char *kernel_src, size_t max_len)
 {
-  size_t i;
-  for (i = 0; i < max_len; i++) 
+  for (size_t i = 0; i < max_len; i++) 
   {
     if (!is_user_vaddr(user_dst) || !_put_byte_to_user(user_dst, kernel_src[i])) 
     {
@@ -425,27 +433,29 @@ syscall_exit(int status)
 static pid_t
 syscall_exec(const char *file)
 {
-  char kernel_file[255]; // TODO: Malloc this instead
-  
-  DEBUG_PRINT("[syscall_exec] Executing '%s'\n", file);
+  char *kernel_file = malloc(PATH_MAX);
+  if (kernel_file == NULL)
+  {
+    return PID_ERROR;
+  }
   
   /* Copy the filename string from user space. */
-  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  if (!strncpy_from_user(kernel_file, (void *)file, PATH_MAX))
   {
-    DEBUG_PRINT("[syscall_exec] Invalid filename pointer\n");
-    return PID_ERROR;
+    free(kernel_file);
+    syscall_exit(-1);
   }
   
   /* Check for empty filename. */
   if (kernel_file[0] == '\0')
   {
-    DEBUG_PRINT("[syscall_exec] Empty filename\n");
+    free(kernel_file);
     return PID_ERROR;
   }
   
   /* Execute the new process. */
   pid_t pid = process_execute(kernel_file);
-  DEBUG_PRINT("[syscall_exec] process_execute returned pid=%d\n", pid);
+  free(kernel_file);
   
   return pid;
 }
@@ -459,15 +469,21 @@ syscall_wait(pid_t pid)
 static bool
 syscall_create(const char *file, unsigned initial_size)
 {
-  char kernel_file[256];
-  
-  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  char *kernel_file = malloc(PATH_MAX);
+  if (kernel_file == NULL)
   {
     return false;
   }
   
+  if (!strncpy_from_user(kernel_file, (void *)file, PATH_MAX))
+  {
+    free(kernel_file);
+    syscall_exit(-1);
+  }
+  
   if (kernel_file[0] == '\0')
   {
+    free(kernel_file);
     return false;
   }
   
@@ -475,21 +491,28 @@ syscall_create(const char *file, unsigned initial_size)
   bool ok = filesys_create(kernel_file, initial_size);
   lock_release(&filesys_lock);
   
+  free(kernel_file);
   return ok;
 }
 
 static bool
 syscall_remove(const char *file)
 {
-  char kernel_file[256];
-  
-  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  char *kernel_file = malloc(PATH_MAX);
+  if (kernel_file == NULL)
   {
     return false;
   }
   
+  if (!strncpy_from_user(kernel_file, (void *)file, PATH_MAX))
+  {
+    free(kernel_file);
+    syscall_exit(-1);
+  }
+  
   if (kernel_file[0] == '\0')
   {
+    free(kernel_file);
     return false;
   }
   
@@ -497,27 +520,36 @@ syscall_remove(const char *file)
   bool ok = filesys_remove(kernel_file);
   lock_release(&filesys_lock);
   
+  free(kernel_file);
   return ok;
 }
 
 static int
 syscall_open(const char *file)
 {
-  char kernel_file[256];
-  
-  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  char *kernel_file = malloc(PATH_MAX);
+  if (kernel_file == NULL)
   {
     return -1;
   }
   
+  if (!strncpy_from_user(kernel_file, (void *)file, PATH_MAX))
+  {
+    free(kernel_file);
+    syscall_exit(-1);
+  }
+  
   if (kernel_file[0] == '\0')
   {
+    free(kernel_file);
     return -1;
   }
   
   lock_acquire(&filesys_lock);
   struct file *fp = filesys_open(kernel_file);
   lock_release(&filesys_lock);
+  
+  free(kernel_file);
   
   if (fp == NULL)
   {
@@ -556,14 +588,18 @@ syscall_filesize(int fd)
 static int
 syscall_read(int fd, void *buffer, unsigned length)
 {
+  if (length == 0) return 0;
   /* FD 0 is stdin - read from keyboard */
   if (fd == 0)
   {
-    unsigned i;
-    uint8_t *buf = buffer;
-    for (i = 0; i < length; i++)
+    uint8_t kernel_buffer[length];
+    for (unsigned i = 0; i < length; i++)
     {
-      buf[i] = input_getc();
+      kernel_buffer[i] = input_getc();
+    }
+    if (!memcpy_to_user(buffer, kernel_buffer, length))
+    {
+      syscall_exit(-1);
     }
     return length;
   }
@@ -575,20 +611,50 @@ syscall_read(int fd, void *buffer, unsigned length)
     return -1;
   }
   
+  /* Read into a kernel buffer first */
+  void *kernel_buffer = malloc(length);
+  if (kernel_buffer == NULL)
+  {
+    return -1;
+  }
+  
   lock_acquire(&filesys_lock);
-  int bytes = file_read(fp, buffer, length);
+  int bytes = file_read(fp, kernel_buffer, length);
   lock_release(&filesys_lock);
   
+  /* Copy to user buffer with validation */
+  if (bytes > 0 && !memcpy_to_user(buffer, kernel_buffer, bytes))
+  {
+    free(kernel_buffer);
+    syscall_exit(-1);
+  }
+  
+  free(kernel_buffer);
   return bytes;
 }
 
 static int
 syscall_write(int fd, const void *buffer, unsigned length)
 {
+  if (length == 0) return 0;
+  /* Copy from user buffer to kernel buffer with validation */
+  void *kernel_buffer = malloc(length);
+  if (kernel_buffer == NULL)
+  {
+    return -1;
+  }
+  
+  if (!memcpy_from_user(kernel_buffer, buffer, length))
+  {
+    free(kernel_buffer);
+    syscall_exit(-1);
+  }
+  
   /* FD 1 is stdout - write to console */
   if (fd == 1)
   {
-    putbuf(buffer, length);
+    putbuf(kernel_buffer, length);
+    free(kernel_buffer);
     return (int)length;
   }
   
@@ -596,13 +662,15 @@ syscall_write(int fd, const void *buffer, unsigned length)
   struct file *fp = fd_table_get(fd);
   if (fp == NULL)
   {
+    free(kernel_buffer);
     return -1;
   }
   
   lock_acquire(&filesys_lock);
-  int bytes = file_write(fp, buffer, length);
+  int bytes = file_write(fp, kernel_buffer, length);
   lock_release(&filesys_lock);
   
+  free(kernel_buffer);
   return bytes;
 }
 
