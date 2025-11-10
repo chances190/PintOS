@@ -1,7 +1,6 @@
 # PintOS - Relatório de Implementação
 
 ## Projeto 2 - User Programs
-> **OBS**: Embora a passagem de argumentos esteja 100% implementada, não consegui concluir a syscall `exit()` e, portanto, nenhum teste desta seção em diante está funcionando. Este relatório reflete mais o meu entendimento exato do que precisa ser implementado no projeto do que o resultado dos meus esforços (individuais) de implementar, pois tive muitas dificuldades com o código.
 
 
 ### Parte 1 - Carregamento de Processos e Passagem de Argumentos
@@ -65,27 +64,50 @@
 - ❌ `userprog/wait-killed`: Espera por filho que foi morto — verifica notificação e status.
 - ❌ `userprog/wait-bad-pid`: `wait()` com pid inválido — testa erro no argumento de `wait()`.
 
-### Parte 3 - Interface Geral de Syscalls e Validação de Ponteiros
-#### `userprog/syscall.c`, `lib/kernel/**.c`
-- Implementadas funções auxiliares para validação de ponteiros de usuário (`get_user()`, `verify_user_address()`)
-- Modificada `syscall_handler()` para validar todos os ponteiros antes de acessar memória do usuário
-- Adicionado tratamento de erro para page faults e acessos inválidos, abortando a thread de forma limpa
-- Centralizado o despacho de syscalls em uma tabela de funções
+### Parte 3 - Interface Geral de Syscalls e Validação de Ponteiros (Método 2: Page Faults)
+
+#### `userprog/syscall.c`
+- Adicionadas declarações de funções auxiliares para acesso seguro à memória do usuário: `memcpy_from_user()`, `strncpy_from_user()`, `memcpy_to_user()`, `strncpy_to_user()`
+- Modificada `syscall_handler()` para utilizar `memcpy_from_user()` ao extrair argumentos da pilha do usuário em vez de acesso direto
+- Implementadas funções `_get_byte_from_user()` e `_put_byte_to_user()` com inline assembly para recuperação de page faults
+- Implementadas `memcpy_from_user()` e `memcpy_to_user()` para cópia byte-a-byte com validação de endereços via `is_user_vaddr()`
+- Implementadas `strncpy_from_user()` e `strncpy_to_user()` para cópia segura de strings nulo-terminadas com limite de comprimento
+- Adicionada inclusão de `<threads/vaddr.h>` para utilização de macros de validação de espaço de usuário
+
+#### `userprog/exception.c`
+- Modificado handler de page fault `page_fault()` para implementar Método 2 de validação de ponteiros
+- Adicionada verificação: se page fault não ocorreu em modo usuário (`!user`) E o endereço faultado é de usuário (`is_user_vaddr(fault_addr)`), então é um acesso de kernel a memória de usuário inválido
+- Implementado mecanismo de recuperação: desvia `eip` para endereço de recuperação (armazenado em `eax`) e sinaliza erro com `eax = 0xffffffff`
+- Retorna controle normalmente sem causar kernel panic, permitindo que funções de cópia segura detectem e tratarem o erro
 
 #### Design
-1. Ao receber uma syscall, os argumentos são empacotados a partir de `f->esp` em um array de inteiros
-2. Antes de acessar qualquer argumento ou ponteiro fornecido pelo usuário, chama-se `verify_user_address()` para garantir que o endereço é válido
-3. Se for detectado um ponteiro inválido, a thread termina imediatamente com `exit(-1)`
-4. O dispatcher de syscalls utiliza uma tabela para mapear códigos de syscall para funções específicas
-5. Todos os acessos a buffers de leitura/escrita passam por validação antes de serem utilizados
+
+**Método de Validação Escolhido: Método 2 (Page Faults)** conforme proposto no guia oficial do projeto PintOS.
+
+1. **Acesso seguro à memória do usuário** (Método 2 - Page Faults):
+   - Funções `_get_byte_from_user()` e `_put_byte_to_user()` utilizam inline assembly com tratamento de exceção
+   - Ao tentar ler/escrever em endereço inválido de usuário, a CPU dispara um page fault (exceção)
+   - O handler de page fault (`page_fault()` em `exception.c`) detecta se o fault ocorreu em modo kernel (`!user`) e o endereço é de usuário (`is_user_vaddr(fault_addr)`)
+   - Se detectado, o handler desvia `eip` para o rótulo de recuperação (armazenado em `eax`) e retorna, evitando o kernel panic
+   - As funções retornam `false` para indicar falha
+
+2. **Validação de argumentos em syscalls**:
+   - Ao receber uma syscall, `syscall_handler()` primeiro valida e extrai o número da syscall usando `memcpy_from_user()`
+   - Cada argumento é extraído com validação, retornando `false` em caso de falha
+   - Se qualquer argumento for inválido, a thread termina imediatamente com `syscall_exit(-1)`
+   - Endereços de ponteiros são validados com `is_user_vaddr()` antes de lê-los
+
+3. **Funções de cópia segura**:
+   - `memcpy_from_user()` / `memcpy_to_user()`: Copia byte-a-byte validando cada acesso
+   - `strncpy_from_user()` / `strncpy_to_user()`: Copia strings nulo-terminadas com limite de comprimento
+   - Todas mantêm invariantes de validação e retornam booleano indicando sucesso/falha
 
 #### Resultados de Testes
-#### Resultados de Testes
-- ❌ `userprog/sc-bad-sp`: Stack pointer inválido em syscall — testa detecção de SP fora dos limites.
-- ❌ `userprog/sc-bad-arg`: Argumento inválido em syscall — valida checagem de ponteiros de argumento.
-- ❌ `userprog/sc-boundary`: Syscall no limite da pilha (1) — teste de caso fronteira da pilha (implementado/testado conforme nota).
-- ❌ `userprog/sc-boundary-2`: Syscall no limite da pilha (2) — segunda variante de fronteira de SP.
-- ❌ `userprog/sc-boundary-3`: Syscall no limite da pilha (3) — terceira variante de fronteira de SP.
+- ✅ `userprog/sc-bad-sp`: Validação de stack pointer inválido — acesso a memória não mapeada 64MB abaixo do limite válido.
+- ✅ `userprog/sc-bad-arg`: Validação de argumentos fora do espaço de usuário — número de syscall válido, mas argumento localizado acima do limite de memória do usuário.
+- ✅ `userprog/sc-boundary`: Syscall dividido entre páginas — número de syscall e argumento em páginas diferentes (ambas válidas).
+- ✅ `userprog/sc-boundary-2`: Bytes de syscall parcialmente inválidos — primeiro byte do número em memória válida, bytes restantes fora do espaço de usuário.
+- ✅ `userprog/sc-boundary-3`: Número de syscall no limite do BSS — posicionado na fronteira final da memória alocada.
 
 - ❌ `userprog/bad-read`: `read()` com ponteiro inválido — garante que leituras em endereços inválidos abortem o processo.
 - ❌ `userprog/bad-write`: `write()` com ponteiro inválido — valida proteção contra gravações em memória não mapeada.
