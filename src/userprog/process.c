@@ -21,11 +21,12 @@
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *exec_string, void (**eip) (void), void **esp);
+static struct process_exec_status* process_exec_status_init();
 
 struct start_process_args 
 {
   char *exec_string;
-  struct process_exec_status *child_stat;
+  struct process_exec_status *exec_status;
 };
 
 /* Starts a new thread running a user program loaded with
@@ -40,7 +41,7 @@ process_execute (const char *exec_string)
   tid_t tid;
   struct thread *cur = thread_current ();
   struct thread *child;
-  struct process_exec_status *child_stat;
+  struct process_exec_status *child_exec_status;
 
   /* Make a copy of FILE_NAME for the child process
   (first token before space) */
@@ -59,10 +60,10 @@ process_execute (const char *exec_string)
   }
   strlcpy (exec_string_cp, exec_string, PGSIZE);
 
-  /* Create a CHILD_STATUS struct for the child process. */
+  /* Create an EXEC_STATUS struct for the child process. */
   DEBUG_PRINT("[process_execute] Creating child status\n");
-  child_stat = malloc(sizeof(struct process_exec_status));
-  if (child_stat == NULL)
+  child_exec_status = process_exec_status_init();
+  if (child_exec_status == NULL)
   {
     palloc_free_page(filename);
     palloc_free_page(exec_string_cp);
@@ -79,35 +80,39 @@ process_execute (const char *exec_string)
   /* Pack the arguments of start_process into a struct*/
   struct start_process_args *args = malloc(sizeof(struct start_process_args));
   if (args == NULL) {
-    free(child_stat);
+    free(child_exec_status);
     palloc_free_page(filename);
     palloc_free_page(exec_string_cp);
     return PID_ERROR;
   }
   args->exec_string = exec_string_cp;
-  args->child_stat = child_stat;
+  args->exec_status = child_exec_status;
   
-  /* Create a new thread to execute FILENAME. */
+  /* Create a new thread to execute FILENAME as an user process. */
   DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", filename);
   tid = thread_create(filename, PRI_DEFAULT, start_process, args);
   palloc_free_page(filename);
-  if (tid == TID_ERROR) 
+  if (tid == TID_ERROR)
   {
+    /* Couldn't create thread for child process */
     DEBUG_PRINT("[process_execute] thread_create failed\n");
-    free(child_stat);
+    free(child_exec_status);
     palloc_free_page(exec_string_cp);
     free(args);
     return PID_ERROR;
   }
-  DEBUG_PRINT("[process_execute] Thread created with tid=%d\n", tid);
-  list_push_back(&cur->children, &child_stat->elem);
+  
+  /* Add the new process as a child of the current process. */
+  DEBUG_PRINT("[process_execute] Process created with pid=%d\n", tid);
+  list_push_back(&cur->children, &child_exec_status->elem);
   
   /* Wait for child to finish loading. */
   DEBUG_PRINT("[process_execute] Waiting for child to load...\n");
-  sema_down (&child_stat->wait_sema);
+  sema_down (&child_exec_status->wait_sema);
 
-  if (child_stat->has_exited && child_stat->exit_status == -1)
+  if (child_exec_status->pid == PID_ERROR) 
   {
+    /* Couldn't initialize child process. */
     DEBUG_PRINT("[process_execute] Load failed\n");
     return PID_ERROR;
   }
@@ -123,7 +128,7 @@ start_process (void *args_)
 {
   struct start_process_args *args = args_;
   char *exec_string = args->exec_string;
-  struct process_exec_status *child_stat = args->child_stat;
+  struct process_exec_status *child_stat = args->exec_status;
   
   struct intr_frame if_;
   bool success;
@@ -131,7 +136,6 @@ start_process (void *args_)
   struct thread *cur = thread_current ();
   cur->exec_status = child_stat;
   cur->exec_status->pid = cur->tid;
-
   DEBUG_PRINT("[start_process] tid=%d starting, exec_string='%s'\n", cur->tid, exec_string);
 
   /* Initialize interrupt frame and load executable. */

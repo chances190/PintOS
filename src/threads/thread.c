@@ -12,6 +12,10 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #ifdef USERPROG
+/* Note: This creates a dependency from kernel code to the user program subsystem.
+   In user program mode, kernel threads may represent user processes that need
+   special cleanup in process_exit(). This is a layering compromise in PintOS's
+   design for educational simplicity. */
 #include "userprog/process.h"
 #endif
 
