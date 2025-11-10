@@ -31,7 +31,7 @@ struct start_process_args
 /* Starts a new thread running a user program loaded with
    EXEC_STRING. The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
-   thread id, or TID_ERROR if the thread cannot be created. */
+   thread id, or PID_ERROR if the thread cannot be created. */
 pid_t
 process_execute (const char *exec_string) 
 {
@@ -183,7 +183,7 @@ start_process (void *args_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (pid_t child_tid) 
 {
   struct thread *cur = thread_current ();
   struct process_exec_status *child_stat = NULL;

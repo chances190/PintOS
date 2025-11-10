@@ -419,10 +419,29 @@ syscall_exit(int status)
 static pid_t
 syscall_exec(const char *file)
 {
-    /* TODO: Requires filesystem to load executables.
-       Implement after file operations are working. */
-    printf("syscall_exec not yet implemented\n");
-    return (pid_t)-1;
+  char kernel_file[255]; // TODO: Malloc this instead
+  
+  DEBUG_PRINT("[syscall_exec] Executing '%s'\n", file);
+  
+  /* Copy the filename string from user space. */
+  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  {
+    DEBUG_PRINT("[syscall_exec] Invalid filename pointer\n");
+    return PID_ERROR;
+  }
+  
+  /* Check for empty filename. */
+  if (kernel_file[0] == '\0')
+  {
+    DEBUG_PRINT("[syscall_exec] Empty filename\n");
+    return PID_ERROR;
+  }
+  
+  /* Execute the new process. */
+  pid_t pid = process_execute(kernel_file);
+  DEBUG_PRINT("[syscall_exec] process_execute returned pid=%d\n", pid);
+  
+  return pid;
 }
 
 static int

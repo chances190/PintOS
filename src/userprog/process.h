@@ -20,8 +20,8 @@ typedef int mapid_t;
 #define EXIT_SUCCESS 0          /* Successful execution. */
 #define EXIT_FAILURE 1          /* Unsuccessful execution. */
 
-tid_t process_execute (const char *exec_string);
-int process_wait (tid_t);
+pid_t process_execute (const char *exec_string);
+int process_wait (pid_t);
 void process_exit (void);
 void process_activate (void);
 

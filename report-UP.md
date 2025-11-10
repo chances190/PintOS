@@ -30,54 +30,112 @@
 - ✅ `userprog/args-dbl-space`: Espaços duplos tratados corretamente — garante que espaços extras não criem argumentos vazios.
 
 ### Parte 2 - Controle de Processos (halt, exit, exec, wait)
-#### `userprog/process.c`, `userprog/syscall.c`, `threads/thread.c`
-- Implementadas funções de syscall: `halt()`, `exit(status)`, `exec(cmd)`, `wait(pid)`
-- Modificada `syscall_handler()` para despachar chamadas de sistema e extrair argumentos da pilha do usuário
-- Adicionada impressão do status de saída em `exit()`
-- Implementada sincronização entre processos pai e filho usando semáforos e variáveis de condição
-- Estruturado gerenciamento de status de saída e comunicação entre threads
+
+#### `threads/thread.h`
+- Definida estrutura `process_exec_status` para rastrear status de processos filhos
+- Adicionado campo `struct list children` em `struct thread` — lista de estruturas `process_exec_status` dos filhos
+- Adicionado campo `struct process_exec_status *exec_status` em `struct thread` — ponteiro para estrutura compartilhada com pai
+
+#### `threads/thread.c`
+- Modificado `thread_create()` para alocar e inicializar `process_exec_status` do novo processo
+- Modificado `init_thread()` para inicializar lista `children` vazia
+
+#### `userprog/syscall.c`
+- Implementada `syscall_halt()` — chama `shutdown_power_off()` para desligar sistema
+- Implementada `syscall_exit()` — salva status em `exec_status`, imprime mensagem de saída, chama `thread_exit()`
+- Implementada `syscall_exec()` — valida string do comando, chama `process_execute()`, retorna PID ou erro
+- Implementada `syscall_wait()` — delega para `process_wait()` passando PID do filho
+- Adicionados casos correspondentes em `syscall_handler()` para despachar as syscalls
+
+#### `userprog/process.c`
+- **`process_execute()`**: Alterado retorno de `tid_t` para `pid_t`; aloca `process_exec_status` e adiciona à lista `children` do pai antes de criar thread
+- **`process_wait()`**: Reimplementado para buscar filho por PID na lista `children`; valida se já teve `wait()` chamado; bloqueia em semáforo até filho terminar; retorna exit status e libera estrutura
+- **`process_exit()`**: Salva exit status; verifica se é órfão para decidir liberar estrutura ou sinalizar pai via semáforo; marca todos os filhos como órfãos e libera estruturas se necessário
 
 #### Design
-1. O processo de usuário faz uma chamada de sistema (ex: `exit`, `exec`, `wait`, `halt`)
-2. O handler de syscall (`syscall_handler`) identifica o código da syscall e extrai os argumentos da pilha do usuário
-3. Para `exec`, uma nova thread de usuário é criada, inicializando estruturas de controle de filho e retornando o tid
-4. Para `wait`, o processo pai bloqueia até que o filho termine, usando semáforo/condição para sincronização
-5. Para `exit`, o processo registra o status de saída, imprime a mensagem e libera recursos, sinalizando o pai se necessário
-6. Em caso de erro de validação de ponteiro ou falha de carregamento, a thread termina com `exit(-1)`
+1. **Estrutura de Dados** (`threads/thread.h`):
+   ```c
+   struct process_exec_status {
+     pid_t pid;                    // ID do processo filho
+     int exit_status;              // Status de saída (-1 se killed)
+     bool has_exited;              // True se processo já terminou
+     bool waited_on;               // True se pai já chamou wait()
+     bool orphan;                  // True se pai já terminou
+     struct lock lock;             // Protege acessos concorrentes
+     struct semaphore wait_sema;   // Pai bloqueia aqui até child exit
+     struct list_elem elem;        // Link para lista children do pai
+   };
+   ```
+
+2. **exec() - `syscall_exec()` e `process_execute()`**:
+   1. Valida string do filename com `strncpy_from_user()`
+   2. Aloca `process_exec_status` e adiciona à lista `children` do pai
+   3. Cria nova thread com `thread_create()`, passando `exec_string` completa
+   4. Filho inicializa seu `exec_status` apontando para estrutura compartilhada
+   5. Retorna `pid` (igual ao `tid`) ou `PID_ERROR` em caso de falha
+
+3. **wait() - `process_wait()`**:
+   1. Busca `process_exec_status` com pid correspondente na lista `children`
+   2. Se não encontrado ou já teve `wait()` chamado: retorna -1
+   3. Marca `waited_on = true` para prevenir múltiplos waits
+   4. Chama `sema_down(&child_stat->wait_sema)` - **bloqueia até child terminar**
+   5. Quando desbloqueado: lê `exit_status`, remove da lista, libera estrutura
+   6. Retorna `exit_status` do filho
+
+4. **exit() - `syscall_exit()` e `process_exit()`**:
+   1. Thread salva `exit_status` em `exec_status->exit_status`
+   2. Imprime mensagem: `printf("%s: exit(%d)\n", name, status)`
+   3. Adquire lock da estrutura para checar se pai ainda existe (`orphan`)
+   4. Se `orphan == true`: libera própria estrutura (pai já foi embora)
+   5. Se `orphan == false`: chama `sema_up(&exec_status->wait_sema)` - **desbloqueia pai**
+   6. Marca todos os filhos como órfãos e libera estruturas se já terminaram
+   7. Fecha todos os file descriptors, destrói page directory, termina thread
+
+5. **halt()**: Chama `shutdown_power_off()` para desligar o sistema
+
+6. **Race Conditions Tratadas**:
+   - ✅ Pai chama wait() antes do filho terminar: Pai bloqueia até sinal
+   - ✅ Filho termina antes do pai chamar wait(): Status salvo, wait retorna imediatamente
+   - ✅ Pai termina antes do filho: Filho vira órfão, libera própria estrutura
+   - ✅ Múltiplos waits no mesmo filho: Segundo wait retorna -1
+   - ✅ Wait em PID inválido: Retorna -1
 
 #### Resultados de Testes
 - ✅ `userprog/halt`: Desliga o sistema — testa se a syscall de desligamento encerra corretamente o kernel.
-- ❌ `userprog/exit`: Exit básico imprime status — valida que o processo finaliza e reporta o status de saída.
+- ✅ `userprog/exit`: Exit básico imprime status — valida que o processo finaliza e reporta o status de saída.
 
-- ❌ `userprog/exec-once`: Execução simples de um processo — carrega e executa um único programa.
-- ❌ `userprog/exec-arg`: Exec com argumentos — testa se `exec()` aceita e passa a string de comando corretamente.
-- ❌ `userprog/exec-bound`: Exec com argumento no limite de tamanho — verifica limites de tamanho do comando.
-- ❌ `userprog/exec-bound-2`: Variante de limite de `exec()` — testa limites de buffer/heap ao executar.
-- ❌ `userprog/exec-bound-3`: Outra variante de limite de `exec()` — casos fronteira adicionais de `exec()`.
-- ❌ `userprog/exec-multiple`: Execução de múltiplos programas — cria vários filhos sequencialmente/paralelamente.
-- ❌ `userprog/exec-missing`: Exec de programa ausente — `exec()` deve falhar e retornar erro/indicar falha.
-- ❌ `userprog/exec-bad-ptr`: `exec()` com ponteiro inválido — validações de ponteiro causam `exit(-1)`.
+- ✅ `userprog/exec-once`: Execução simples de um processo — carrega e executa um único programa.
+- ✅ `userprog/exec-arg`: Exec com argumentos — testa se `exec()` aceita e passa a string de comando corretamente.
+- ✅ `userprog/exec-bound`: Exec com argumento no limite de tamanho — verifica limites de tamanho do comando.
+- ✅ `userprog/exec-bound-2`: Variante de limite de `exec()` — testa limites de buffer/heap ao executar.
+- 🟡 `userprog/exec-bound-3`: Outra variante de limite de `exec()` — casos fronteira adicionais de `exec()`. (implementado, não testado)
+- ✅ `userprog/exec-multiple`: Execução de múltiplos programas — cria vários filhos sequencialmente/paralelamente.
+- ✅ `userprog/exec-missing`: Exec de programa ausente — `exec()` deve falhar e retornar erro/indicar falha.
+- ✅ `userprog/exec-bad-ptr`: `exec()` com ponteiro inválido — validações de ponteiro causam `exit(-1)`.
 
-- ❌ `userprog/wait-simple`: `wait()` em um filho simples — pai aguarda término e recebe status.
-- ❌ `userprog/wait-twice`: `wait()` é chamado duas vezes no mesmo filho — testa comportamento e retornos.
-- ❌ `userprog/wait-killed`: Espera por filho que foi morto — verifica notificação e status.
-- ❌ `userprog/wait-bad-pid`: `wait()` com pid inválido — testa erro no argumento de `wait()`.
+- ✅ `userprog/wait-simple`: `wait()` em um filho simples — pai aguarda término e recebe status.
+- ✅ `userprog/wait-twice`: `wait()` é chamado duas vezes no mesmo filho — segunda chamada retorna -1.
+- ✅ `userprog/wait-killed`: Espera por filho que foi morto — retorna -1 corretamente.
+- ✅ `userprog/wait-bad-pid`: `wait()` com pid inválido — retorna -1 imediatamente.
+
+- ✅ `userprog/multi-recurse`: Execuções aninhadas de processos — testa `exec()` recursivo e empilhamento de processos.
 
 ### Parte 3 - Interface Geral de Syscalls e Validação de Ponteiros (Método 2: Page Faults)
 
 #### `userprog/syscall.c`
-- Adicionadas declarações de funções auxiliares para acesso seguro à memória do usuário: `memcpy_from_user()`, `strncpy_from_user()`, `memcpy_to_user()`, `strncpy_to_user()`
-- Modificada `syscall_handler()` para utilizar `memcpy_from_user()` ao extrair argumentos da pilha do usuário em vez de acesso direto
 - Implementadas funções `_get_byte_from_user()` e `_put_byte_to_user()` com inline assembly para recuperação de page faults
-- Implementadas `memcpy_from_user()` e `memcpy_to_user()` para cópia byte-a-byte com validação de endereços via `is_user_vaddr()`
-- Implementadas `strncpy_from_user()` e `strncpy_to_user()` para cópia segura de strings nulo-terminadas com limite de comprimento
-- Adicionada inclusão de `<threads/vaddr.h>` para utilização de macros de validação de espaço de usuário
+- Implementada função `memcpy_from_user()` copiando byte-a-byte com validação `is_user_vaddr()` em cada acesso
+- Implementada função `strncpy_from_user()` para cópia segura de strings nulo-terminadas com limite `max_len`
+- Implementada função `memcpy_to_user()` gravando byte-a-byte com validação de endereço de usuário
+- Implementada função `strncpy_to_user()` para escrita segura de strings em espaço de usuário
+- Modificado `syscall_handler()` para validar e extrair argumentos usando `memcpy_from_user()` em vez de acesso direto
+- Adicionada chamada a `syscall_exit(-1)` quando validação de argumentos falha
 
 #### `userprog/exception.c`
-- Modificado handler de page fault `page_fault()` para implementar Método 2 de validação de ponteiros
-- Adicionada verificação: se page fault não ocorreu em modo usuário (`!user`) E o endereço faultado é de usuário (`is_user_vaddr(fault_addr)`), então é um acesso de kernel a memória de usuário inválido
-- Implementado mecanismo de recuperação: desvia `eip` para endereço de recuperação (armazenado em `eax`) e sinaliza erro com `eax = 0xffffffff`
-- Retorna controle normalmente sem causar kernel panic, permitindo que funções de cópia segura detectem e tratarem o erro
+- Modificado handler `page_fault()` para detectar acessos do kernel a memória de usuário inválida
+- Adicionada verificação: se `!user && is_user_vaddr(fault_addr)` então é acesso kernel inválido
+- Implementado mecanismo de recuperação: desvia `eip` para endereço em `eax` e sinaliza erro com `eax = 0xffffffff`
+- Configurado retorno de controle sem kernel panic, permitindo funções de cópia detectarem erro
 
 #### Design
 
@@ -115,21 +173,28 @@
 - ❌ `userprog/bad-jump`: Salto para endereço inválido — testa proteção contra saltos para código não mapeado.
 - ❌ `userprog/bad-jump2`: Outra variante de salto inválido — caso fronteira de execução insegura.
 
-### Parte 4 - Chamadas de Sistema de Arquivo
-#### `userprog/syscall.c`, `filesys/file.c`, `filesys/inode.c`
-- Implementadas syscalls de arquivos: `create()`, `remove()`, `open()`, `filesize()`, `read()`, `write()`, `seek()`, `tell()`, `close()`
-- Modificada a estrutura de cada thread para manter uma tabela de file descriptors (`struct file_descriptor`)
-- Adicionada sincronização de acesso ao sistema de arquivos usando locks globais
-- Delegadas operações de arquivos para funções do subsistema `filesys`
+---
 
-#### Design
-1. Ao chamar `open()`, o arquivo é aberto e um novo file descriptor único é atribuído à thread, ou retorna -1 em caso de erro
-2. As syscalls `read()` e `write()` validam os buffers de usuário e delegam a leitura/escrita para `file_read()` e `file_write()`
-3. `seek()` e `tell()` manipulam a posição de leitura/escrita do arquivo associado ao file descriptor
-4. `close()` remove o file descriptor da tabela da thread e fecha o arquivo correspondente
-5. Todas as operações de arquivos são protegidas por um lock global para garantir acesso concorrente seguro
+## Funcionalidades NÃO Implementadas
 
-#### Resultados de Testes
+### Chamadas de Sistema de Arquivo
+
+**Status**: ❌ **Não implementado**
+
+Syscalls pendentes: `create()`, `remove()`, `open()`, `filesize()`, `read()`, `write()`, `seek()`, `tell()`, `close()`
+
+**Infraestrutura preparada**:
+- Campo `struct file *fd_table[FD_TABLE_SIZE]` já existe em `struct thread` (`threads/thread.h`)
+- Definido `FD_TABLE_SIZE` como 128
+
+**O que falta**:
+- Implementar funções auxiliares em `process.c`: `process_add_file()`, `process_get_file()`, `process_close_file()`
+- Implementar as syscalls em `syscall.c`
+- Adicionar sincronização global com lock para filesystem
+- Modificar `process_exit()` para fechar fds abertos
+- Implementar deny-write para executáveis (`file_deny_write()` em `load()`)
+
+#### Testes Pendentes
 - ❌ `userprog/create-normal`: Criação normal de arquivo — testa `create()` com nome válido e tamanho.
 - ❌ `userprog/create-empty`: `create()` com nome vazio — verifica comportamento para nomes inválidos/vazios.
 - ❌ `userprog/create-null`: `create()` com ponteiro NULL — valida checagem de ponteiro de nome.
@@ -164,7 +229,7 @@
 - ❌ `userprog/write-boundary`: `write()` em limites de buffer/pilha — casos fronteira.
 - ❌ `userprog/write-zero`: `write()` com tamanho zero — deve retornar 0 sem erro.
 - ✅ `userprog/write-stdin`: `write()` em STDIN — teste de comportamento em descritor não-escrita.
-- ✅ `userprog/write-bad-fd`: `write()` com fd inválido — valida retorno de erro para fd incorreto.
+- ❌ `userprog/write-bad-fd`: `write()` com fd inválido — valida retorno de erro para fd incorreto.
 
 - ❌ `filesys/base/lg-create`: Teste de carga grande para `create()` — cria muitos arquivos para estressar FS.
 - ❌ `filesys/base/lg-full`: Criação até encher FS — testa condição de disco cheio.
@@ -180,30 +245,28 @@
 - ❌ `filesys/base/syn-remove`: Remoção concorrente de arquivos — sincronização e segurança.
 - ❌ `filesys/base/syn-write`: Escrita concorrente no mesmo arquivo — valida locks e atomicidade.
 
-### Parte 5 - Compartilhamento de Descritores e Processos Filhos
-#### `userprog/syscall.c`, `threads/thread.c`, `filesys/file.c`
-- Implementada herança de file descriptors durante `exec()` para processos filhos
-- Adicionada sincronização de acesso concorrente a arquivos com lock global do sistema de arquivos
-- Estruturada lista de gerenciamento de filhos (`child_info`) em cada thread para controle de status e sincronização
+### Out of Memory (OOM) Handling
 
-#### Design
-1. Ao executar `exec`, a tabela de file descriptors do processo pai é duplicada para o processo filho, permitindo herança de arquivos abertos
-2. Todas as operações de leitura/escrita/fechamento de arquivos utilizam o lock global para evitar condições de corrida
-3. Cada thread mantém uma lista de filhos (`child_info`) com status de término e semáforo para sincronização
-4. O pai pode chamar `wait()` para aguardar o término de um filho específico, liberando o registro após o término
-5. O gerenciamento de recursos garante que file descriptors e estruturas de filhos sejam liberados corretamente ao final do processo
+**Status**: ❌ **Não implementado**
 
-#### Resultados de Testes
-- ❌ `userprog/multi-recurse`: Execuções aninhadas de processos — testa `exec()` recursivo e empilhamento de processos.
-- ❌ `userprog/multi-child-fd`: Filho herda e compartilha fds — verifica herança e concorrência em arquivos abertos.
-- ❌ `userprog/rox-simple`: Regiões de sobreposição (rox) simples — testa concorrência/locks em operações sobrepostas.
-- ❌ `userprog/rox-child`: Variante com filho — rox com múltiplos processos acessando o mesmo arquivo.
-- ❌ `userprog/rox-multichild`: Variante multi-filho — testa contenção e sincronização entre muitos filhos.
+**O que falta**:
+- Tratamento correto de falha de alocação de memória em `process_execute()` e `load()`
+- Retornar erro apropriado quando não há memória suficiente para criar processo
 
-- ❌ `userprog/exec-multiple`: Execução de múltiplos programas (listada também na Parte 2) — testes de criação e término de vários filhos.
-- ❌ `userprog/multi-recurse`: (duplicado) Execuções aninhadas — reforça casos de recursão em `exec()`.
+#### Testes Pendentes
+- ❌ `userprog/no-vm/multi-oom`: Múltiplos processos até OOM — testa comportamento quando memória física se esgota.
 
-- ❌ `userprog/wait-simple`: Espera por filho simples — sincronização pai/filho.
-- ❌ `userprog/wait-twice`: Espera duplicada pelo mesmo filho — comportamento ante múltiplas chamadas `wait()`.
-- ❌ `userprog/wait-killed`: Espera por filho que foi morto — caso de sinalização e status de término.
-- ❌ `userprog/wait-bad-pid`: `wait()` com PID inválido — valida retorno de erro.
+### Deny Writes to Executables (Read-Only Executables)
+
+**Status**: ❌ **Não implementado**
+
+**O que falta**:
+- Chamar `file_deny_write()` no arquivo executável em `load()` após abrir
+- Armazenar ponteiro do arquivo executável em novo campo `exec_file` em `struct thread`
+- Em `process_exit()`, chamar `file_allow_write()` e fechar o `exec_file`
+
+#### Testes Pendentes
+- ❌ `userprog/multi-child-fd`: Filho tenta acessar fd do pai — verifica isolamento correto.
+- ❌ `userprog/rox-simple`: Read-only executable simples — previne escrita em executável em execução.
+- ❌ `userprog/rox-child`: Read-only executable com filho — múltiplos processos não podem escrever no executável.
+- ❌ `userprog/rox-multichild`: Read-only executable multi-filho — testa proteção com muitos processos simultâneos.
