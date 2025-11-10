@@ -22,11 +22,17 @@
 static thread_func start_process NO_RETURN;
 static bool load (const char *exec_string, void (**eip) (void), void **esp);
 
+struct start_process_args 
+{
+  char *exec_string;
+  struct process_exec_status *child_stat;
+};
+
 /* Starts a new thread running a user program loaded with
    EXEC_STRING. The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
-tid_t
+pid_t
 process_execute (const char *exec_string) 
 {
   char *exec_string_cp = NULL, *filename = NULL;
@@ -34,113 +40,97 @@ process_execute (const char *exec_string)
   tid_t tid;
   struct thread *cur = thread_current ();
   struct thread *child;
-  struct child_status *child_stat;
+  struct process_exec_status *child_stat;
 
-  /* Make a copy of EXEC_STRING.
-     Otherwise there's a race between the caller and load(). */
-  exec_string_cp = palloc_get_page (0);
-  if (exec_string_cp == NULL) return TID_ERROR;
-  strlcpy (exec_string_cp, exec_string, PGSIZE);
-
-  /* Make a copy of FILE_NAME
+  /* Make a copy of FILE_NAME for the child process
   (first token before space) */
   filename = palloc_get_page (0);
-  if (filename == NULL)
-  {
-    palloc_free_page(exec_string_cp);
-    return TID_ERROR;
-  }
-  fn_len = strcspn(exec_string_cp, " ");
+  if (filename == NULL) return TID_ERROR;
+  fn_len = strcspn(exec_string, " ");
   if (fn_len >= PGSIZE) fn_len = PGSIZE - 1;
-  strlcpy(filename, exec_string_cp, fn_len + 1);
+  strlcpy(filename, exec_string, fn_len + 1);
 
-  /* Create a child_status structure for the child process.
-     Do this BEFORE creating the thread to avoid race conditions. */
+  /* Make a copy of EXEC_STRING for the child process */
+  exec_string_cp = palloc_get_page (0);
+  if (exec_string_cp == NULL)
+  {
+    palloc_free_page(filename);
+    return PID_ERROR;
+  }
+  strlcpy (exec_string_cp, exec_string, PGSIZE);
+
+  /* Create a CHILD_STATUS struct for the child process. */
   DEBUG_PRINT("[process_execute] Creating child status\n");
-  child_stat = malloc(sizeof(struct child_status));
+  child_stat = malloc(sizeof(struct process_exec_status));
   if (child_stat == NULL)
   {
     palloc_free_page(filename);
     palloc_free_page(exec_string_cp);
-    return TID_ERROR;
+    return PID_ERROR;
   }
-  
-  /* Initialize child_status fields. */
-  child_stat->tid = TID_ERROR;  /* Will be set after thread_create. */
+  child_stat->pid = PID_ERROR;  /* Will be set after thread_create. */
   child_stat->exit_status = -1;
   child_stat->has_exited = false;
   child_stat->waited_on = false;
-  child_stat->parent_alive = true;
+  child_stat->orphan = false;
   sema_init(&child_stat->wait_sema, 0);
   lock_init(&child_stat->lock);
   
-  /* Add to parent's children list. */
-  list_push_back(&cur->children, &child_stat->elem);
-
-  /* Create a new thread to execute FILE_NAME. */
-  DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", filename);
-  tid = thread_create (filename, PRI_DEFAULT, start_process, exec_string_cp);
-  palloc_free_page (filename);
+  /* Pack the arguments of start_process into a struct*/
+  struct start_process_args *args = malloc(sizeof(struct start_process_args));
+  if (args == NULL) {
+    free(child_stat);
+    palloc_free_page(filename);
+    palloc_free_page(exec_string_cp);
+    return PID_ERROR;
+  }
+  args->exec_string = exec_string_cp;
+  args->child_stat = child_stat;
   
+  /* Create a new thread to execute FILENAME. */
+  DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", filename);
+  tid = thread_create(filename, PRI_DEFAULT, start_process, args);
+  palloc_free_page(filename);
   if (tid == TID_ERROR) 
   {
     DEBUG_PRINT("[process_execute] thread_create failed\n");
-    list_remove(&child_stat->elem);
     free(child_stat);
-    palloc_free_page (exec_string_cp);
-    return TID_ERROR;
+    palloc_free_page(exec_string_cp);
+    free(args);
+    return PID_ERROR;
   }
-  
-  /* Now set the tid and link child to child_status. 
-     This must happen after thread_create but before child runs. */
-  child_stat->tid = tid;
-  child = thread_get_by_tid(tid);
-  if (child != NULL)
-  {
-    child->child_status = child_stat;
-  }
-  else
-  {
-    /* Child already exited before we could link it - this shouldn't happen
-       but handle gracefully. */
-    DEBUG_PRINT("[process_execute] Child already exited\n");
-    list_remove(&child_stat->elem);
-    free(child_stat);
-    return TID_ERROR;
-  }
-  
   DEBUG_PRINT("[process_execute] Thread created with tid=%d\n", tid);
+  list_push_back(&cur->children, &child_stat->elem);
   
   /* Wait for child to finish loading. */
   DEBUG_PRINT("[process_execute] Waiting for child to load...\n");
   sema_down (&child_stat->wait_sema);
-  
-  /* Check load result. */
-  lock_acquire(&child_stat->lock);
-  bool load_failed = child_stat->has_exited && child_stat->exit_status == -1;
-  lock_release(&child_stat->lock);
-  
-  DEBUG_PRINT("[process_execute] Child load completed, failed=%d\n", load_failed);
-  
-  if (load_failed)
+
+  if (child_stat->has_exited && child_stat->exit_status == -1)
   {
     DEBUG_PRINT("[process_execute] Load failed\n");
-    return TID_ERROR;
+    return PID_ERROR;
   }
 
-  DEBUG_PRINT("[process_execute] Returning tid=%d\n", tid);
-  return tid;
+  DEBUG_PRINT("[process_execute] Load completed. Returning pid=%d\n", tid);
+  return (pid_t) tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *exec_string_)
+start_process (void *args_)
 {
-  char *exec_string = exec_string_;
+  struct start_process_args *args = args_;
+  char *exec_string = args->exec_string;
+  struct process_exec_status *child_stat = args->child_stat;
+  
   struct intr_frame if_;
   bool success;
+  
   struct thread *cur = thread_current ();
+  cur->exec_status = child_stat;
+  cur->exec_status->pid = cur->tid;
 
   DEBUG_PRINT("[start_process] tid=%d starting, exec_string='%s'\n", cur->tid, exec_string);
 
@@ -153,32 +143,22 @@ start_process (void *exec_string_)
   DEBUG_PRINT("[start_process] Calling load()...\n");
   success = load (exec_string, &if_.eip, &if_.esp);
   DEBUG_PRINT("[start_process] load() returned %d\n", success);
-
-  /* Free the exec_string copy. */
-  DEBUG_PRINT("[start_process] Freeing exec_string page\n");
   palloc_free_page (exec_string);
+  free(args);
   
-  /* Notify parent about load status via child_status. */
-  if (cur->child_status != NULL)
+  if (!success)
   {
-    lock_acquire(&cur->child_status->lock);
-    if (!success)
-    {
-      /* Load failed - mark as exited with -1. */
-      cur->child_status->has_exited = true;
-      cur->child_status->exit_status = -1;
-    }
-    lock_release(&cur->child_status->lock);
-    
-    DEBUG_PRINT("[start_process] Signaling parent (sema_up on wait_sema)\n");
-    sema_up (&cur->child_status->wait_sema);
+    /* Load failed - mark as exited with -1. */
+    cur->exec_status->has_exited = true;
+    cur->exec_status->exit_status = -1;
   }
   
-  /* If load failed, exit with status -1. */
+  DEBUG_PRINT("[start_process] Signaling parent (sema_up on wait_sema)\n");
+  sema_up (&cur->exec_status->wait_sema);
+  
   if (!success)
   {
     DEBUG_PRINT("[start_process] Load failed, exiting with status -1\n");
-    cur->exit_status = -1;
     thread_exit ();
   }
 
@@ -206,19 +186,19 @@ int
 process_wait (tid_t child_tid UNUSED) 
 {
   struct thread *cur = thread_current ();
-  struct child_status *child_stat = NULL;
+  struct process_exec_status *child_stat = NULL;
   struct list_elem *e;
   int exit_status;
   bool should_wait;
   
   DEBUG_PRINT("[process_wait] tid=%d waiting for child_tid=%d\n", cur->tid, child_tid);
   
-  /* Find the child_status with the given TID. */
+  /* Find the process_exec_status with the given TID. */
   for (e = list_begin (&cur->children); e != list_end (&cur->children);
        e = list_next (e))
   {
-    struct child_status *cs = list_entry (e, struct child_status, elem);
-    if (cs->tid == child_tid)
+    struct process_exec_status *cs = list_entry (e, struct process_exec_status, elem);
+    if (cs->pid == child_tid)
     {
       child_stat = cs;
       break;
@@ -233,31 +213,18 @@ process_wait (tid_t child_tid UNUSED)
   }
   
   /* Check if already waited on this child. */
-  lock_acquire(&child_stat->lock);
   if (child_stat->waited_on)
   {
-    lock_release(&child_stat->lock);
     DEBUG_PRINT("[process_wait] Already waited on this child, returning -1\n");
     return -1;
   }
   
-  /* Mark as waited on. */
+  /* Mark as waited on and wait unconditionally. */
+  DEBUG_PRINT("[process_wait] Waiting for child to exit (sema_down on wait_sema)...\n");
   child_stat->waited_on = true;
-  should_wait = !child_stat->has_exited;
-  lock_release(&child_stat->lock);
+  sema_down (&child_stat->wait_sema);
   
-  /* If child hasn't exited yet, wait for it. */
-  if (should_wait)
-  {
-    DEBUG_PRINT("[process_wait] Waiting for child to exit (sema_down on wait_sema)...\n");
-    sema_down (&child_stat->wait_sema);
-  }
-  
-  /* Get exit status, remove from list, and free the child_status. */
-  lock_acquire(&child_stat->lock);
-  exit_status = child_stat->exit_status;
-  lock_release(&child_stat->lock);
-  
+  exit_status = child_stat->exit_status;  
   list_remove (&child_stat->elem);
   free(child_stat);
   
@@ -271,66 +238,43 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
-  bool should_free_child_status = false;
+  struct process_exec_status *my_status = cur->exec_status;
+  ASSERT (my_status != NULL);
 
-  DEBUG_PRINT("[process_exit] tid=%d exiting with status %d\n", cur->tid, cur->exit_status);
+  DEBUG_PRINT("[process_exit] tid=%d exiting\n", cur->tid);
 
-  /* Update child_status and signal parent that we've exited. */
-  if (cur->child_status != NULL)
-  {
-    lock_acquire(&cur->child_status->lock);
-    
-    /* Store exit status. */
-    cur->child_status->exit_status = cur->exit_status;
-    cur->child_status->has_exited = true;
-    
-    /* Check if parent is still alive. */
-    if (cur->child_status->parent_alive)
-    {
-      /* Parent is alive - signal it and let parent free child_status. */
-      DEBUG_PRINT("[process_exit] Signaling parent (sema_up on wait_sema)\n");
-      lock_release(&cur->child_status->lock);
-      sema_up (&cur->child_status->wait_sema);
-    }
-    else
-    {
-      /* Parent already exited - we must free child_status ourselves. */
-      DEBUG_PRINT("[process_exit] Parent gone, freeing child_status\n");
-      lock_release(&cur->child_status->lock);
-      should_free_child_status = true;
-    }
-  }
+  /* Lock REQUIRED: both parent and child 
+     access orphan/has_exited to decide who frees. */
+  lock_acquire(&my_status->lock);
+  my_status->has_exited = true;
+  bool orphan = my_status->orphan;
+  lock_release(&my_status->lock);
   
-  /* Mark all our children as orphaned and free their child_status structures.
-     The children are still running - they just won't be able to signal us. */
+  DEBUG_PRINT("[process_exit] %s\n", orphan
+              ? "Parent gone, will free process_exec_status"
+              : "Signaling parent (sema_up on wait_sema)");
+  
+  if (orphan) free(my_status); /* Parent is gone. We own this structure now. */
+  else sema_up(&my_status->wait_sema); /* Parent is waiting. Signal it. */
+
+
   while (!list_empty(&cur->children))
   {
     struct list_elem *e = list_pop_front(&cur->children);
-    struct child_status *cs = list_entry(e, struct child_status, elem);
+    struct process_exec_status *cs = list_entry(e, struct process_exec_status, elem);
     
+    /* Lock REQUIRED: both parent and child access 
+       orphan/has_exited to decide who frees. */
     lock_acquire(&cs->lock);
-    cs->parent_alive = false;
+    cs->orphan = true;
+    bool should_free_child = cs->has_exited;
+    lock_release(&cs->lock);
     
-    /* If child has already exited, we need to free the child_status now.
-       Otherwise, the child will free it when it exits. */
-    if (cs->has_exited)
-    {
-      DEBUG_PRINT("[process_exit] Child tid=%d already exited, freeing its child_status\n", cs->tid);
-      lock_release(&cs->lock);
-      free(cs);
-    }
-    else
-    {
-      DEBUG_PRINT("[process_exit] Child tid=%d still running, marking as orphaned\n", cs->tid);
-      lock_release(&cs->lock);
-      /* Child will free this when it exits. */
-    }
-  }
-  
-  /* Free our own child_status if parent is gone. */
-  if (should_free_child_status)
-  {
-    free(cur->child_status);
+    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", cs->pid, should_free_child
+                ? "already exited, will free its process_exec_status"
+                : "still running, marking as orphaned");
+    
+    if (should_free_child) free(cs);
   }
 
   /* Destroy the current process's page directory and switch back

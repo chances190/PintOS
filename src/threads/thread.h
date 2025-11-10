@@ -26,19 +26,23 @@ typedef int tid_t;
 #define PRI_MAX 63                      /* Highest priority. */
 
 #ifdef USERPROG
+/* Process identifier. */
+typedef int pid_t;
+#define PID_ERROR ((pid_t) -1)
+
 /* Structure to hold information about a child process that persists
    after the child thread exits. This allows the parent to wait for
    and retrieve the exit status of children that exit before wait() is called. */
-struct child_status
+struct process_exec_status
 {
-  tid_t tid;                          /* Child's thread ID. */
-  int exit_status;                    /* Exit status of the child. */
-  bool has_exited;                    /* True if child has exited. */
-  bool waited_on;                     /* Has parent already waited? */
-  bool parent_alive;                  /* Is the parent still alive? */
-  struct list_elem elem;              /* List element for parent's children list. */
-  struct lock lock;                   /* Lock for synchronizing access. */
-  struct semaphore wait_sema;         /* Semaphore for parent to wait on. */
+   pid_t pid;                          /* Process ID. */
+   int exit_status;                    /* Exit status code from process. */
+   bool has_exited;                    /* True if process has exited. */
+   bool waited_on;                     /* True if parent has already called wait(). */
+   bool orphan;                        /* True if parent process has already exited. */
+   struct list_elem elem;              /* List element linking to parent's process list. */
+   struct lock lock;                   /* Lock for synchronizing concurrent access to this structure. */
+   struct semaphore wait_sema;         /* Semaphore that parent waits on until process exits. */
 };
 
 #define FD_TABLE_SIZE 128
@@ -116,9 +120,9 @@ struct thread
    struct file *fd_table[FD_TABLE_SIZE]; /* Open files (fd 2-127; 0=stdin, 1=stdout). */
 
    /* Process control. */
-   int exit_status;                    /* Exit status of this process. */
-   struct child_status *child_status;  /* Pointer to this thread's child_status in parent. */
-   struct list children;               /* List of child_status structures. */
+   struct list children;                     /* List of process_exec_status structures. */
+   struct process_exec_status *exec_status;  /* Pointer to this thread's exec_status.
+                                                Ownership is shared with parent. */
 #endif   
    /* Owned by thread.c */
    struct list_elem allelem;           /* List element for all threads list. */

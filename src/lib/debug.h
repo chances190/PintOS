@@ -25,7 +25,7 @@ void debug_backtrace_all(void);
 #undef ASSERT
 #undef NOT_REACHED
 
-#define DEBUG
+// #define DEBUG
 
 /* Para usar esse print tem que usar #define DEBUG true
  * ele fica mais fácil de usar pois para "cancelar" é so trocar para false ou

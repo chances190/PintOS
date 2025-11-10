@@ -29,6 +29,7 @@ static int syscall_write(int fd, const void *buffer, unsigned length);
 static void syscall_seek(int fd, unsigned position);
 static unsigned syscall_tell(int fd);
 static void syscall_close(int fd);
+
 static mapid_t syscall_mmap(int fd, void *addr);
 static void syscall_munmap(mapid_t mapping);
 static bool syscall_chdir(const char *dir);
@@ -408,11 +409,11 @@ syscall_halt(void)
 static void
 syscall_exit(int status)
 {
-    struct thread *cur = thread_current ();
-    DEBUG_PRINT("[syscall_exit] tid=%d exiting with status %d\n", cur->tid, status);
-    cur->exit_status = status;
-    printf("%s: exit(%d)\n", cur->name, status);
-    thread_exit();
+  struct thread *cur = thread_current ();
+  DEBUG_PRINT("[syscall_exit] tid=%d exiting with status %d\n", cur->tid, status);
+  cur->exec_status->exit_status = status;
+  printf("%s: exit(%d)\n", cur->name, status);
+  thread_exit();
 }
 
 static pid_t
