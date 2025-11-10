@@ -553,10 +553,9 @@ init_thread (struct thread *t, const char *name, int priority)
   t->wake_time = 0;
 
 #ifdef USERPROG
+  t->pagedir = NULL;
   list_init (&t->children);
   t->exec_status = NULL;
-  
-  /* Initialize file descriptor table. */
   for (int i = 0; i < FD_TABLE_SIZE; i++)
     t->fd_table[i] = NULL;
 #endif

@@ -1,13 +1,14 @@
 #include "userprog/syscall.h"
 #include <stdio.h>
 #include <syscall-nr.h>
-#include <console.h> /* putbuf for console writes */
+#include <console.h>
 #include <debug.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/process.h"
-#include "devices/shutdown.h" /* halt() */
+#include "userprog/fdtable.h"
+#include "devices/shutdown.h"
 
 static void syscall_handler (struct intr_frame *f);
 
@@ -41,6 +42,7 @@ static int syscall_inumber(int fd);
 void
 syscall_init (void) 
 {
+  fd_table_init_lock();
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "userprog/fdtable.h"
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
@@ -69,13 +70,6 @@ process_execute (const char *exec_string)
     palloc_free_page(exec_string_cp);
     return PID_ERROR;
   }
-  child_stat->pid = PID_ERROR;  /* Will be set after thread_create. */
-  child_stat->exit_status = -1;
-  child_stat->has_exited = false;
-  child_stat->waited_on = false;
-  child_stat->orphan = false;
-  sema_init(&child_stat->wait_sema, 0);
-  lock_init(&child_stat->lock);
   
   /* Pack the arguments of start_process into a struct*/
   struct start_process_args *args = malloc(sizeof(struct start_process_args));
@@ -280,6 +274,9 @@ process_exit (void)
     
     if (should_free_child) free(cs);
   }
+
+  /* Close all open file descriptors. */
+  fd_table_close_all();
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -758,4 +755,21 @@ install_page (void *upage, void *kpage, bool writable)
      address, then map our page there. */
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
+}
+
+/* Initialize a process_exec_status structure. */
+static struct process_exec_status*
+process_exec_status_init()
+{
+  struct process_exec_status *exec_status =  malloc(sizeof(struct process_exec_status));
+  if (exec_status == NULL)
+    return NULL;
+  exec_status->pid = PID_ERROR;
+  exec_status->exit_status = -1;
+  exec_status->has_exited = false;
+  exec_status->waited_on = false;
+  exec_status->orphan = false;
+  sema_init(&exec_status->wait_sema, 0);
+  lock_init(&exec_status->lock); 
+  return exec_status;
 }

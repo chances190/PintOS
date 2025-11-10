@@ -45,7 +45,7 @@ struct process_exec_status
    struct semaphore wait_sema;         /* Semaphore that parent waits on until process exits. */
 };
 
-#define FD_TABLE_SIZE 128
+#define FD_TABLE_SIZE 128              /* Maximum open files per process. */
 #endif
 
 /* A kernel thread or user process.
