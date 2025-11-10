@@ -6,9 +6,13 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"
 #include "userprog/process.h"
 #include "userprog/fdtable.h"
 #include "devices/shutdown.h"
+#include "devices/input.h"
+#include "filesys/filesys.h"
+#include "filesys/file.h"
 
 static void syscall_handler (struct intr_frame *f);
 
@@ -455,66 +459,205 @@ syscall_wait(pid_t pid)
 static bool
 syscall_create(const char *file, unsigned initial_size)
 {
-    printf("syscall_create not yet implemented\n");
+  char kernel_file[256];
+  
+  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  {
     return false;
+  }
+  
+  if (kernel_file[0] == '\0')
+  {
+    return false;
+  }
+  
+  lock_acquire(&filesys_lock);
+  bool ok = filesys_create(kernel_file, initial_size);
+  lock_release(&filesys_lock);
+  
+  return ok;
 }
 
 static bool
 syscall_remove(const char *file)
 {
-    printf("syscall_remove not yet implemented\n");
+  char kernel_file[256];
+  
+  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  {
     return false;
+  }
+  
+  if (kernel_file[0] == '\0')
+  {
+    return false;
+  }
+  
+  lock_acquire(&filesys_lock);
+  bool ok = filesys_remove(kernel_file);
+  lock_release(&filesys_lock);
+  
+  return ok;
 }
 
 static int
 syscall_open(const char *file)
 {
-    printf("syscall_open not yet implemented\n");
+  char kernel_file[256];
+  
+  if (!strncpy_from_user(kernel_file, (void *)file, sizeof(kernel_file)))
+  {
     return -1;
+  }
+  
+  if (kernel_file[0] == '\0')
+  {
+    return -1;
+  }
+  
+  lock_acquire(&filesys_lock);
+  struct file *fp = filesys_open(kernel_file);
+  lock_release(&filesys_lock);
+  
+  if (fp == NULL)
+  {
+    return -1;
+  }
+  
+  int fd = fd_table_alloc(fp);
+  if (fd == -1)
+  {
+    lock_acquire(&filesys_lock);
+    file_close(fp);
+    lock_release(&filesys_lock);
+    return -1;
+  }
+  
+  return fd;
 }
 
 static int
 syscall_filesize(int fd)
 {
-    printf("syscall_filesize not yet implemented\n");
+  struct file *fp = fd_table_get(fd);
+  
+  if (fp == NULL)
+  {
     return -1;
+  }
+  
+  lock_acquire(&filesys_lock);
+  int size = file_length(fp);
+  lock_release(&filesys_lock);
+  
+  return size;
 }
 
 static int
 syscall_read(int fd, void *buffer, unsigned length)
 {
-    printf("syscall_read not yet implemented\n");
+  /* FD 0 is stdin - read from keyboard */
+  if (fd == 0)
+  {
+    unsigned i;
+    uint8_t *buf = buffer;
+    for (i = 0; i < length; i++)
+    {
+      buf[i] = input_getc();
+    }
+    return length;
+  }
+  
+  /* FD >= 2 are regular files */
+  struct file *fp = fd_table_get(fd);
+  if (fp == NULL)
+  {
     return -1;
+  }
+  
+  lock_acquire(&filesys_lock);
+  int bytes = file_read(fp, buffer, length);
+  lock_release(&filesys_lock);
+  
+  return bytes;
 }
 
 static int
 syscall_write(int fd, const void *buffer, unsigned length)
 {
-    if (fd == 1) {
-        putbuf((const char *)buffer, length);
-        return (int) length;
-    }
-    printf("syscall_write: fd %d not yet implemented\n", fd);
+  /* FD 1 is stdout - write to console */
+  if (fd == 1)
+  {
+    putbuf(buffer, length);
+    return (int)length;
+  }
+  
+  /* FD >= 2 are regular files */
+  struct file *fp = fd_table_get(fd);
+  if (fp == NULL)
+  {
     return -1;
+  }
+  
+  lock_acquire(&filesys_lock);
+  int bytes = file_write(fp, buffer, length);
+  lock_release(&filesys_lock);
+  
+  return bytes;
 }
 
 static void
 syscall_seek(int fd, unsigned position)
 {
-    printf("syscall_seek not yet implemented\n");
+  struct file *fp = fd_table_get(fd);
+  
+  if (fp == NULL)
+  {
+    return;
+  }
+  
+  lock_acquire(&filesys_lock);
+  file_seek(fp, position);
+  lock_release(&filesys_lock);
 }
 
 static unsigned
 syscall_tell(int fd)
 {
-    printf("syscall_tell not yet implemented\n");
+  struct file *fp = fd_table_get(fd);
+  
+  if (fp == NULL)
+  {
     return (unsigned)-1;
+  }
+  
+  lock_acquire(&filesys_lock);
+  unsigned pos = file_tell(fp);
+  lock_release(&filesys_lock);
+  
+  return pos;
 }
 
 static void
 syscall_close(int fd)
 {
-    printf("syscall_close not yet implemented\n");
+  /* FD 0 (stdin) and 1 (stdout) cannot be closed */
+  if (fd < 2)
+  {
+    return;
+  }
+  
+  struct file *fp = fd_table_get(fd);
+  if (fp == NULL)
+  {
+    return;
+  }
+  
+  lock_acquire(&filesys_lock);
+  file_close(fp);
+  lock_release(&filesys_lock);
+  
+  fd_table_free(fd);
 }
 
 static mapid_t
