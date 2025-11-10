@@ -554,6 +554,7 @@ init_thread (struct thread *t, const char *name, int priority)
 
 #ifdef USERPROG
   t->pagedir = NULL;
+  t->exec_file = NULL;
   list_init (&t->children);
   t->exec_status = NULL;
   for (int i = 0; i < FD_TABLE_SIZE; i++)

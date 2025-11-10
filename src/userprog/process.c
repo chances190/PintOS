@@ -104,7 +104,7 @@ process_execute (const char *exec_string)
   DEBUG_PRINT("[process_execute] Waiting for child to load...\n");
   sema_down (&child_exec_status->wait_sema);
 
-  if (child_exec_status->pid == PID_ERROR) 
+  if (child_exec_status->exit_status == -1) 
   {
     /* Couldn't initialize child process. */
     DEBUG_PRINT("[process_execute] Load failed\n");
@@ -148,7 +148,6 @@ start_process (void *args_)
   {
     /* Load failed - mark as exited with -1. */
     cur->exec_status->pid = PID_ERROR;
-    cur->exec_status->has_exited = true;
     cur->exec_status->exit_status = -1;
   }
   
@@ -279,6 +278,14 @@ process_exit (void)
   /* Close all open file descriptors. */
   fd_table_close_all();
 
+  /* Close and allow writes to the executable file. */
+  if (cur->exec_file != NULL)
+  {
+    file_allow_write(cur->exec_file);
+    file_close(cur->exec_file);
+    cur->exec_file = NULL;
+  }
+
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
@@ -383,9 +390,9 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           bool writable);
 
 /* Loads an ELF executable invoked with EXEC_STRING into the current
-   thread. Stores the executable's entry point into *EIP
-   and its initial stack pointer into *ESP.
-   Returns true if successful, false otherwise. */
+  thread. Stores the executable's entry point into *EIP
+  and its initial stack pointer into *ESP.
+  Returns true if successful, false otherwise. */
 bool
 load (const char *exec_string, void (**eip) (void), void **esp) 
 {
@@ -393,7 +400,7 @@ load (const char *exec_string, void (**eip) (void), void **esp)
   struct Elf32_Ehdr ehdr;
   struct file *file = NULL;
   off_t file_ofs;
-  bool success = false;
+  bool ret = false;
   int i;
   char filename[NAME_MAX + 1];
   int fn_len;
@@ -404,103 +411,105 @@ load (const char *exec_string, void (**eip) (void), void **esp)
 
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
-  if (t->pagedir == NULL) 
-    goto done;
+  if (t->pagedir == NULL) goto cleanup;
   process_activate ();
 
   /* Open executable file. */
   file = filesys_open (filename);
   if (file == NULL) 
-    {
-      printf ("load: %s: open failed\n", filename);
-      goto done; 
-    }
+  {
+    printf ("load: %s: open failed\n", filename);
+    goto cleanup; 
+  }
 
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
-      || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
-      || ehdr.e_type != 2
-      || ehdr.e_machine != 3
-      || ehdr.e_version != 1
-      || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
-      || ehdr.e_phnum > 1024) 
-    {
-      printf ("load: %s: error loading executable\n", filename);
-      goto done; 
-    }
+    || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
+    || ehdr.e_type != 2
+    || ehdr.e_machine != 3
+    || ehdr.e_version != 1
+    || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
+    || ehdr.e_phnum > 1024) 
+  {
+    printf ("load: %s: error loading executable\n", filename);
+    goto cleanup; 
+  }
 
   /* Read program headers. */
   file_ofs = ehdr.e_phoff;
   for (i = 0; i < ehdr.e_phnum; i++) 
+  {
+    struct Elf32_Phdr phdr;
+
+    if (file_ofs < 0 || file_ofs > file_length (file)) goto cleanup;
+    file_seek (file, file_ofs);
+
+    if (file_read (file, &phdr, sizeof phdr) != sizeof phdr) goto cleanup;
+    file_ofs += sizeof phdr;
+
+    switch (phdr.p_type) 
     {
-      struct Elf32_Phdr phdr;
-
-      if (file_ofs < 0 || file_ofs > file_length (file))
-        goto done;
-      file_seek (file, file_ofs);
-
-      if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
-        goto done;
-      file_ofs += sizeof phdr;
-      switch (phdr.p_type) 
+      case PT_NULL:
+      case PT_NOTE:
+      case PT_PHDR:
+      case PT_STACK:
+      default:
+       /* Ignore this segment. */
+        break;
+      case PT_DYNAMIC:
+      case PT_INTERP:
+      case PT_SHLIB:
+        goto cleanup;
+      case PT_LOAD:
+        if (validate_segment (&phdr, file)) 
         {
-        case PT_NULL:
-        case PT_NOTE:
-        case PT_PHDR:
-        case PT_STACK:
-        default:
-          /* Ignore this segment. */
-          break;
-        case PT_DYNAMIC:
-        case PT_INTERP:
-        case PT_SHLIB:
-          goto done;
-        case PT_LOAD:
-          if (validate_segment (&phdr, file)) 
-            {
-              bool writable = (phdr.p_flags & PF_W) != 0;
-              uint32_t file_page = phdr.p_offset & ~PGMASK;
-              uint32_t mem_page = phdr.p_vaddr & ~PGMASK;
-              uint32_t page_offset = phdr.p_vaddr & PGMASK;
-              uint32_t read_bytes, zero_bytes;
-              if (phdr.p_filesz > 0)
-                {
-                  /* Normal segment.
-                     Read initial part from disk and zero the rest. */
-                  read_bytes = page_offset + phdr.p_filesz;
-                  zero_bytes = (ROUND_UP (page_offset + phdr.p_memsz, PGSIZE)
-                                - read_bytes);
-                }
-              else 
-                {
-                  /* Entirely zero.
-                     Don't read anything from disk. */
-                  read_bytes = 0;
-                  zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
-                }
-              if (!load_segment (file, file_page, (void *) mem_page,
-                                 read_bytes, zero_bytes, writable))
-                goto done;
-            }
-          else
-            goto done;
-          break;
+          bool writable = (phdr.p_flags & PF_W) != 0;
+          uint32_t file_page = phdr.p_offset & ~PGMASK;
+          uint32_t mem_page = phdr.p_vaddr & ~PGMASK;
+          uint32_t page_offset = phdr.p_vaddr & PGMASK;
+          uint32_t read_bytes, zero_bytes;
+          if (phdr.p_filesz > 0)
+          {
+            /* Normal segment.
+              Read initial part from disk and zero the rest. */
+            read_bytes = page_offset + phdr.p_filesz;
+            zero_bytes = (ROUND_UP (page_offset + phdr.p_memsz, PGSIZE)
+                      - read_bytes);
+          }
+          else 
+          {
+            /* Entirely zero.
+              Don't read anything from disk. */
+            read_bytes = 0;
+            zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
+          }
+          if (!load_segment (file, file_page, (void *) mem_page,
+                             read_bytes, zero_bytes, writable))
+          {
+            goto cleanup;
+          }
         }
-    }
+        else goto cleanup;
+        break;
+      }
+   }
 
   /* Set up stack. */
-  if (!setup_stack (exec_string, esp))
-    goto done;
+  if (!setup_stack (exec_string, esp)) goto cleanup;
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
-  success = true;
+  /* Deny writes to executable file while it's running. */
+  file_deny_write (file);
+  t->exec_file = file;
 
- done:
+  ret = true;
+
+cleanup:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
-  return success;
+  if (!ret && file != NULL) file_close (file);
+  return ret;
 }
 
 
@@ -766,7 +775,7 @@ process_exec_status_init()
   if (exec_status == NULL)
     return NULL;
   exec_status->pid = PID_ERROR;
-  exec_status->exit_status = -1;
+  exec_status->exit_status = 0;
   exec_status->has_exited = false;
   exec_status->waited_on = false;
   exec_status->orphan = false;
