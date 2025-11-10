@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <syscall-nr.h>
 #include <console.h> /* putbuf for console writes */
+#include <debug.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
@@ -407,13 +408,18 @@ syscall_halt(void)
 static void
 syscall_exit(int status)
 {
-    printf("%s: exit(%d)\n", thread_current()->name, status);
-    thread_exit(); // TODO: Pass status
+    struct thread *cur = thread_current ();
+    DEBUG_PRINT("[syscall_exit] tid=%d exiting with status %d\n", cur->tid, status);
+    cur->exit_status = status;
+    printf("%s: exit(%d)\n", cur->name, status);
+    thread_exit();
 }
 
 static pid_t
 syscall_exec(const char *file)
 {
+    /* TODO: Requires filesystem to load executables.
+       Implement after file operations are working. */
     printf("syscall_exec not yet implemented\n");
     return (pid_t)-1;
 }
@@ -421,8 +427,7 @@ syscall_exec(const char *file)
 static int
 syscall_wait(pid_t pid)
 {
-    printf("syscall_wait not yet implemented\n");
-    return -1;
+    return process_wait(pid);
 }
 
 static bool

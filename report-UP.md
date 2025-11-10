@@ -23,7 +23,6 @@
     4. Empilhamento de NULL terminator, ponteiros `argv[]`, `argc` e endereço de retorno falso
 
 #### Resultados de Testes
-#### Resultados de Testes
 - ✅ `userprog/args-none`: Sem argumentos — testa a execução de um programa sem parâmetros.
 - ✅ `userprog/args-single`: Um argumento — valida passagem e leitura de um único argumento.
 - ✅ `userprog/args-multiple`: Múltiplos argumentos — verifica parsing e empilhamento de vários argumentos.

@@ -25,6 +25,25 @@ typedef int tid_t;
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
 
+#ifdef USERPROG
+/* Structure to hold information about a child process that persists
+   after the child thread exits. This allows the parent to wait for
+   and retrieve the exit status of children that exit before wait() is called. */
+struct child_status
+{
+  tid_t tid;                          /* Child's thread ID. */
+  int exit_status;                    /* Exit status of the child. */
+  bool has_exited;                    /* True if child has exited. */
+  bool waited_on;                     /* Has parent already waited? */
+  bool parent_alive;                  /* Is the parent still alive? */
+  struct list_elem elem;              /* List element for parent's children list. */
+  struct lock lock;                   /* Lock for synchronizing access. */
+  struct semaphore wait_sema;         /* Semaphore for parent to wait on. */
+};
+
+#define FD_TABLE_SIZE 128
+#endif
+
 /* A kernel thread or user process.
 
    Each thread structure is stored in its own 4 kB page.  The
@@ -91,9 +110,16 @@ struct thread
 
 #ifdef USERPROG
    /* Owned by userprog/process.c. */
-   uint32_t *pagedir;                  /* Page directory. */
-#endif
+   uint32_t *pagedir;                    /* Page directory. */
+   
+   /* File descriptor table. */
+   struct file *fd_table[FD_TABLE_SIZE]; /* Open files (fd 2-127; 0=stdin, 1=stdout). */
 
+   /* Process control. */
+   int exit_status;                    /* Exit status of this process. */
+   struct child_status *child_status;  /* Pointer to this thread's child_status in parent. */
+   struct list children;               /* List of child_status structures. */
+#endif   
    /* Owned by thread.c */
    struct list_elem allelem;           /* List element for all threads list. */
 
@@ -132,6 +158,7 @@ void thread_unblock (struct thread *);
 struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
+struct thread *thread_get_by_tid (tid_t tid);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);

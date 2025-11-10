@@ -1,9 +1,11 @@
 #include "userprog/exception.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <debug.h>
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -148,10 +150,15 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
+  DEBUG_PRINT("[page_fault] fault_addr=%p, not_present=%d, write=%d, user=%d\n",
+              fault_addr, not_present, write, user);
+
    /* Check if this is a kernel page fault caused by accessing 
       invalid user memory. */
   if (!user && is_user_vaddr (fault_addr))
   {
+    DEBUG_PRINT("[page_fault] Kernel accessing invalid user memory, recovering via eax\n");
+    DEBUG_PRINT("[page_fault] Setting eip=%p (from eax), eax=0xffffffff\n", (void*)f->eax);
    /* Set eip to eax (which contains the error handler address)
       and eax to 0xffffffff to signal error, then return. */
     f->eip = (void (*) (void)) f->eax;
@@ -159,6 +166,7 @@ page_fault (struct intr_frame *f)
     return;
   }
 
+  DEBUG_PRINT("[page_fault] Unhandled page fault, killing process\n");
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */

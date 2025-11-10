@@ -15,6 +15,7 @@
 #include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
@@ -31,30 +32,104 @@ process_execute (const char *exec_string)
   char *exec_string_cp = NULL, *filename = NULL;
   size_t fn_len;
   tid_t tid;
+  struct thread *cur = thread_current ();
+  struct thread *child;
+  struct child_status *child_stat;
 
   /* Make a copy of EXEC_STRING.
      Otherwise there's a race between the caller and load(). */
   exec_string_cp = palloc_get_page (0);
-  if (exec_string_cp == NULL) goto fail;
+  if (exec_string_cp == NULL) return TID_ERROR;
   strlcpy (exec_string_cp, exec_string, PGSIZE);
 
   /* Make a copy of FILE_NAME
   (first token before space) */
   filename = palloc_get_page (0);
-  if (filename == NULL) goto fail;
+  if (filename == NULL)
+  {
+    palloc_free_page(exec_string_cp);
+    return TID_ERROR;
+  }
   fn_len = strcspn(exec_string_cp, " ");
+  if (fn_len >= PGSIZE) fn_len = PGSIZE - 1;
   strlcpy(filename, exec_string_cp, fn_len + 1);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (filename, PRI_DEFAULT, start_process, exec_string_cp);
-  if (tid == TID_ERROR) goto fail;
-
-  return tid;
-
-  fail:
-    if (exec_string_cp != NULL) palloc_free_page(exec_string_cp);
-    if (filename != NULL) palloc_free_page(filename);
+  /* Create a child_status structure for the child process.
+     Do this BEFORE creating the thread to avoid race conditions. */
+  DEBUG_PRINT("[process_execute] Creating child status\n");
+  child_stat = malloc(sizeof(struct child_status));
+  if (child_stat == NULL)
+  {
+    palloc_free_page(filename);
+    palloc_free_page(exec_string_cp);
     return TID_ERROR;
+  }
+  
+  /* Initialize child_status fields. */
+  child_stat->tid = TID_ERROR;  /* Will be set after thread_create. */
+  child_stat->exit_status = -1;
+  child_stat->has_exited = false;
+  child_stat->waited_on = false;
+  child_stat->parent_alive = true;
+  sema_init(&child_stat->wait_sema, 0);
+  lock_init(&child_stat->lock);
+  
+  /* Add to parent's children list. */
+  list_push_back(&cur->children, &child_stat->elem);
+
+  /* Create a new thread to execute FILE_NAME. */
+  DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", filename);
+  tid = thread_create (filename, PRI_DEFAULT, start_process, exec_string_cp);
+  palloc_free_page (filename);
+  
+  if (tid == TID_ERROR) 
+  {
+    DEBUG_PRINT("[process_execute] thread_create failed\n");
+    list_remove(&child_stat->elem);
+    free(child_stat);
+    palloc_free_page (exec_string_cp);
+    return TID_ERROR;
+  }
+  
+  /* Now set the tid and link child to child_status. 
+     This must happen after thread_create but before child runs. */
+  child_stat->tid = tid;
+  child = thread_get_by_tid(tid);
+  if (child != NULL)
+  {
+    child->child_status = child_stat;
+  }
+  else
+  {
+    /* Child already exited before we could link it - this shouldn't happen
+       but handle gracefully. */
+    DEBUG_PRINT("[process_execute] Child already exited\n");
+    list_remove(&child_stat->elem);
+    free(child_stat);
+    return TID_ERROR;
+  }
+  
+  DEBUG_PRINT("[process_execute] Thread created with tid=%d\n", tid);
+  
+  /* Wait for child to finish loading. */
+  DEBUG_PRINT("[process_execute] Waiting for child to load...\n");
+  sema_down (&child_stat->wait_sema);
+  
+  /* Check load result. */
+  lock_acquire(&child_stat->lock);
+  bool load_failed = child_stat->has_exited && child_stat->exit_status == -1;
+  lock_release(&child_stat->lock);
+  
+  DEBUG_PRINT("[process_execute] Child load completed, failed=%d\n", load_failed);
+  
+  if (load_failed)
+  {
+    DEBUG_PRINT("[process_execute] Load failed\n");
+    return TID_ERROR;
+  }
+
+  DEBUG_PRINT("[process_execute] Returning tid=%d\n", tid);
+  return tid;
 }
 
 /* A thread function that loads a user process and starts it
@@ -65,32 +140,49 @@ start_process (void *exec_string_)
   char *exec_string = exec_string_;
   struct intr_frame if_;
   bool success;
+  struct thread *cur = thread_current ();
+
+  DEBUG_PRINT("[start_process] tid=%d starting, exec_string='%s'\n", cur->tid, exec_string);
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
+  
+  DEBUG_PRINT("[start_process] Calling load()...\n");
   success = load (exec_string, &if_.eip, &if_.esp);
+  DEBUG_PRINT("[start_process] load() returned %d\n", success);
 
-  // DEBUG
-  // {
-  //   /* Extract argc and argv from the user stack frame for debugging */
-  //   uint32_t *stack_u32 = (uint32_t *) if_.esp;
-  //   int debug_argc = (int) stack_u32[1];
-  //   char **debug_argv = (char **) stack_u32[2];
-
-  //   printf("DEBUG: argc = %d\n", debug_argc);
-  //   for (int i = 0; i <= debug_argc; i++) {
-  //     printf("DEBUG: argv[%d] = %s\n", i, debug_argv[i]);
-  //   }
-  // }
-
-  /* If load failed, quit. */
+  /* Free the exec_string copy. */
+  DEBUG_PRINT("[start_process] Freeing exec_string page\n");
   palloc_free_page (exec_string);
-  if (!success) 
+  
+  /* Notify parent about load status via child_status. */
+  if (cur->child_status != NULL)
+  {
+    lock_acquire(&cur->child_status->lock);
+    if (!success)
+    {
+      /* Load failed - mark as exited with -1. */
+      cur->child_status->has_exited = true;
+      cur->child_status->exit_status = -1;
+    }
+    lock_release(&cur->child_status->lock);
+    
+    DEBUG_PRINT("[start_process] Signaling parent (sema_up on wait_sema)\n");
+    sema_up (&cur->child_status->wait_sema);
+  }
+  
+  /* If load failed, exit with status -1. */
+  if (!success)
+  {
+    DEBUG_PRINT("[start_process] Load failed, exiting with status -1\n");
+    cur->exit_status = -1;
     thread_exit ();
+  }
 
+  DEBUG_PRINT("[start_process] Jumping to user mode...\n");
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -113,13 +205,64 @@ start_process (void *exec_string_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  int i;
-  for (i=0 ; i<1000 ; i++)
+  struct thread *cur = thread_current ();
+  struct child_status *child_stat = NULL;
+  struct list_elem *e;
+  int exit_status;
+  bool should_wait;
+  
+  DEBUG_PRINT("[process_wait] tid=%d waiting for child_tid=%d\n", cur->tid, child_tid);
+  
+  /* Find the child_status with the given TID. */
+  for (e = list_begin (&cur->children); e != list_end (&cur->children);
+       e = list_next (e))
   {
-    thread_yield (); // Busy-wait on the main kernel thread
+    struct child_status *cs = list_entry (e, struct child_status, elem);
+    if (cs->tid == child_tid)
+    {
+      child_stat = cs;
+      break;
+    }
   }
-
-  return 0; // FIXME: Just waiting a bit as a gambiarra
+  
+  /* Return -1 if no such child. */
+  if (child_stat == NULL)
+  {
+    DEBUG_PRINT("[process_wait] Child not found, returning -1\n");
+    return -1;
+  }
+  
+  /* Check if already waited on this child. */
+  lock_acquire(&child_stat->lock);
+  if (child_stat->waited_on)
+  {
+    lock_release(&child_stat->lock);
+    DEBUG_PRINT("[process_wait] Already waited on this child, returning -1\n");
+    return -1;
+  }
+  
+  /* Mark as waited on. */
+  child_stat->waited_on = true;
+  should_wait = !child_stat->has_exited;
+  lock_release(&child_stat->lock);
+  
+  /* If child hasn't exited yet, wait for it. */
+  if (should_wait)
+  {
+    DEBUG_PRINT("[process_wait] Waiting for child to exit (sema_down on wait_sema)...\n");
+    sema_down (&child_stat->wait_sema);
+  }
+  
+  /* Get exit status, remove from list, and free the child_status. */
+  lock_acquire(&child_stat->lock);
+  exit_status = child_stat->exit_status;
+  lock_release(&child_stat->lock);
+  
+  list_remove (&child_stat->elem);
+  free(child_stat);
+  
+  DEBUG_PRINT("[process_wait] Child exited with status %d\n", exit_status);
+  return exit_status;
 }
 
 /* Free the current process's resources. */
@@ -128,6 +271,67 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+  bool should_free_child_status = false;
+
+  DEBUG_PRINT("[process_exit] tid=%d exiting with status %d\n", cur->tid, cur->exit_status);
+
+  /* Update child_status and signal parent that we've exited. */
+  if (cur->child_status != NULL)
+  {
+    lock_acquire(&cur->child_status->lock);
+    
+    /* Store exit status. */
+    cur->child_status->exit_status = cur->exit_status;
+    cur->child_status->has_exited = true;
+    
+    /* Check if parent is still alive. */
+    if (cur->child_status->parent_alive)
+    {
+      /* Parent is alive - signal it and let parent free child_status. */
+      DEBUG_PRINT("[process_exit] Signaling parent (sema_up on wait_sema)\n");
+      lock_release(&cur->child_status->lock);
+      sema_up (&cur->child_status->wait_sema);
+    }
+    else
+    {
+      /* Parent already exited - we must free child_status ourselves. */
+      DEBUG_PRINT("[process_exit] Parent gone, freeing child_status\n");
+      lock_release(&cur->child_status->lock);
+      should_free_child_status = true;
+    }
+  }
+  
+  /* Mark all our children as orphaned and free their child_status structures.
+     The children are still running - they just won't be able to signal us. */
+  while (!list_empty(&cur->children))
+  {
+    struct list_elem *e = list_pop_front(&cur->children);
+    struct child_status *cs = list_entry(e, struct child_status, elem);
+    
+    lock_acquire(&cs->lock);
+    cs->parent_alive = false;
+    
+    /* If child has already exited, we need to free the child_status now.
+       Otherwise, the child will free it when it exits. */
+    if (cs->has_exited)
+    {
+      DEBUG_PRINT("[process_exit] Child tid=%d already exited, freeing its child_status\n", cs->tid);
+      lock_release(&cs->lock);
+      free(cs);
+    }
+    else
+    {
+      DEBUG_PRINT("[process_exit] Child tid=%d still running, marking as orphaned\n", cs->tid);
+      lock_release(&cs->lock);
+      /* Child will free this when it exits. */
+    }
+  }
+  
+  /* Free our own child_status if parent is gone. */
+  if (should_free_child_status)
+  {
+    free(cur->child_status);
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */

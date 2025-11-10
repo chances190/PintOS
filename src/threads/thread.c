@@ -292,6 +292,25 @@ thread_tid (void)
   return thread_current ()->tid;
 }
 
+/* Returns the thread with the given TID, or NULL if none exists. */
+struct thread *
+thread_get_by_tid (tid_t tid)
+{
+  struct list_elem *e;
+  enum intr_level old_level = intr_disable ();
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+  {
+    struct thread *t = list_entry (e, struct thread, allelem);
+    if (t->tid == tid) {
+      intr_set_level (old_level);
+      return t;
+    }
+  }
+  intr_set_level (old_level);
+  return NULL;
+}
+
 /* Deschedules the current thread and destroys it.  Never
    returns to the caller. */
 void
@@ -528,6 +547,16 @@ init_thread (struct thread *t, const char *name, int priority)
   t->base_priority = priority;
   t->magic = THREAD_MAGIC;
   t->wake_time = 0;
+
+#ifdef USERPROG
+  t->exit_status = 0;
+  t->child_status = NULL;
+  list_init (&t->children);
+  
+  /* Initialize file descriptor table. */
+  for (int i = 0; i < 128; i++)
+    t->fd_table[i] = NULL;
+#endif
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

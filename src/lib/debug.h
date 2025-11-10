@@ -25,11 +25,13 @@ void debug_backtrace_all(void);
 #undef ASSERT
 #undef NOT_REACHED
 
+#define DEBUG
+
 /* Para usar esse print tem que usar #define DEBUG true
  * ele fica mais fácil de usar pois para "cancelar" é so trocar para false ou
  * não definir
  */
-#if DEBUG
+#ifdef DEBUG
 #define DEBUG_PRINT(...) printf(__VA_ARGS__)
 #else
 #define DEBUG_PRINT(...) ((void)0)
