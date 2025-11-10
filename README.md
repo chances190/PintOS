@@ -62,13 +62,13 @@
 
 #### Parte 1
 
-- [ ] Alarm Clock;
-- [ ] Priority;
-- [ ] Advanced Scheduler - Multi-Level Feedback Queue (mlfqs);
+- [x] Alarm Clock;
+- [x] Priority;
+- [ ] ~Advanced Scheduler - Multi-Level Feedback Queue (mlfqs);~
 
 #### Parte 2
 
-- [ ] Alrgument Passing;
+- [x] Alrgument Passing;
 - [ ] User Memory Acess;
 - [ ] System Calls;
 - [ ] Process Termination;

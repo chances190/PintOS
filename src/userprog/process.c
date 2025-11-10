@@ -19,38 +19,50 @@
 #include "threads/vaddr.h"
 
 static thread_func start_process NO_RETURN;
-static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static bool load (const char *exec_string, void (**eip) (void), void **esp);
 
-/* Starts a new thread running a user program loaded from
-   FILENAME.  The new thread may be scheduled (and may even exit)
+/* Starts a new thread running a user program loaded with
+   EXEC_STRING. The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *exec_string) 
 {
-  char *fn_copy;
+  char *exec_string_cp = NULL, *filename = NULL;
+  size_t fn_len;
   tid_t tid;
 
-  /* Make a copy of FILE_NAME.
+  /* Make a copy of EXEC_STRING.
      Otherwise there's a race between the caller and load(). */
-  fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
-    return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  exec_string_cp = palloc_get_page (0);
+  if (exec_string_cp == NULL) goto fail;
+  strlcpy (exec_string_cp, exec_string, PGSIZE);
+
+  /* Make a copy of FILE_NAME
+  (first token before space) */
+  filename = palloc_get_page (0);
+  if (filename == NULL) goto fail;
+  fn_len = strcspn(exec_string_cp, " ");
+  strlcpy(filename, exec_string_cp, fn_len + 1);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+  tid = thread_create (filename, PRI_DEFAULT, start_process, exec_string_cp);
+  if (tid == TID_ERROR) goto fail;
+
   return tid;
+
+  fail:
+    if (exec_string_cp != NULL) palloc_free_page(exec_string_cp);
+    if (filename != NULL) palloc_free_page(filename);
+    return TID_ERROR;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *exec_string_)
 {
-  char *file_name = file_name_;
+  char *exec_string = exec_string_;
   struct intr_frame if_;
   bool success;
 
@@ -59,10 +71,23 @@ start_process (void *file_name_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (exec_string, &if_.eip, &if_.esp);
+
+  // DEBUG
+  // {
+  //   /* Extract argc and argv from the user stack frame for debugging */
+  //   uint32_t *stack_u32 = (uint32_t *) if_.esp;
+  //   int debug_argc = (int) stack_u32[1];
+  //   char **debug_argv = (char **) stack_u32[2];
+
+  //   printf("DEBUG: argc = %d\n", debug_argc);
+  //   for (int i = 0; i <= debug_argc; i++) {
+  //     printf("DEBUG: argv[%d] = %s\n", i, debug_argv[i]);
+  //   }
+  // }
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
+  palloc_free_page (exec_string);
   if (!success) 
     thread_exit ();
 
@@ -88,7 +113,13 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  return -1;
+  int i;
+  for (i=0 ; i<1000 ; i++)
+  {
+    thread_yield (); // Busy-wait on the main kernel thread
+  }
+
+  return 0; // FIXME: Just waiting a bit as a gambiarra
 }
 
 /* Free the current process's resources. */
@@ -195,18 +226,18 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (const char *exec_string, void **esp);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
                           bool writable);
 
-/* Loads an ELF executable from FILE_NAME into the current thread.
-   Stores the executable's entry point into *EIP
+/* Loads an ELF executable invoked with EXEC_STRING into the current
+   thread. Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp) 
+load (const char *exec_string, void (**eip) (void), void **esp) 
 {
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
@@ -214,6 +245,12 @@ load (const char *file_name, void (**eip) (void), void **esp)
   off_t file_ofs;
   bool success = false;
   int i;
+  char filename[NAME_MAX + 1];
+  int fn_len;
+
+  /* Extract filename (first token) from exec_string */
+  fn_len = strcspn(exec_string, " ");
+  strlcpy(filename, exec_string, fn_len + 1);
 
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
@@ -222,10 +259,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (filename);
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", filename);
       goto done; 
     }
 
@@ -238,7 +275,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
       || ehdr.e_phnum > 1024) 
     {
-      printf ("load: %s: error loading executable\n", file_name);
+      printf ("load: %s: error loading executable\n", filename);
       goto done; 
     }
 
@@ -302,7 +339,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (exec_string, esp))
     goto done;
 
   /* Start address. */
@@ -315,10 +352,12 @@ load (const char *file_name, void (**eip) (void), void **esp)
   file_close (file);
   return success;
 }
-
+
+
 /* load() helpers. */
 
-static bool install_page (void *upage, void *kpage, bool writable);
+static bool
+install_page (void *upage, void *kpage, bool writable);
 
 /* Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
@@ -425,23 +464,128 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 }
 
 /* Create a minimal stack by mapping a zeroed page at the top of
-   user virtual memory. */
+  user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (const char *exec_string, void **esp) 
 {
   uint8_t *kpage;
-  bool success = false;
+  void *current = PHYS_BASE;
+  void *stack_bottom = PHYS_BASE - PGSIZE;
+  char *token, *save_ptr;
+  char *argv[ARG_MAX];
+  int argc = 0;
+  size_t exec_str_len;
+  size_t required_space;
 
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
-  if (kpage != NULL) 
-    {
-      success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
-      if (success)
-        *esp = PHYS_BASE;
-      else
-        palloc_free_page (kpage);
-    }
-  return success;
+  if (kpage == NULL) 
+    goto fail;
+
+  if (!install_page (stack_bottom, kpage, true))
+    goto fail;
+
+  /*
+  * We push the program's arguments and a fake return address onto the new user
+  * stack to build a "fake interrupt/return" frame. `intr_exit` will pop the
+  * CPU state from this fabricated frame and transfer control into the user 
+  * program's main();
+  *
+  * On 32-bit x86 the ABI calling convention expects the return adress and the 
+  * function's arguments on the stack. We must maintain 4-byte alignment to 
+  * match the CPU's expectations when `intr_exit` restores SS, ESP, EFLAGS, CS 
+  * and EIP.
+  *
+  * Minimal stack configuration (addresses low -> high):
+  *
+  *  [ PHYS_BASE - PGSIZE ]       // start of the user page
+  *  < empty space >
+  *  [ esp ]                      // start of the stack
+  *  return address = 0           // fake "return" to userland
+  *  argc                         // first main() argument
+  *  argv                         // second main() argument
+  *  argv[0]                      // pointer to program name string
+  *  argv[1]                      // pointers to program's argument strings
+  *  < ... >
+  *  argv[argc-1]
+  *  argv[argc] = \0              // argv is null-terminated
+  *  padding = 0                  // 0–3 bytes to ensure 4-byte alignment
+  *  < argument strings >         // null-terminated argument strings
+  *  [ PHYS_BASE ]                // end of the stack / user page
+  *
+  */
+
+  /* Push the entire exec_string onto the stack first */
+  exec_str_len = strlen(exec_string) + 1;
+  if ((char *)current - exec_str_len < (char *)stack_bottom)
+    goto fail;
+  current = (char *)current - exec_str_len;
+  strlcpy((char *)current, exec_string, exec_str_len);
+
+  /* Tokenize in-place on the stack and collect argv pointers */
+  for (token = strtok_r((char *)current, " ", &save_ptr); 
+       token != NULL && argc < ARG_MAX; 
+       token = strtok_r(NULL, " ", &save_ptr)) {
+    argv[argc++] = token;
+  }
+  
+  if (argc == 0)
+    goto fail;
+  
+  /* Word-align */
+  current = (void *)((uintptr_t)current & ~3);
+
+  /* Check if we have enough space for all stack data */
+  required_space = sizeof(char *) +         /* NULL terminator */
+                   argc * sizeof(char *) +  /* argv[] array */
+                   sizeof(char **) +        /* argv pointer */
+                   sizeof(int) +            /* argc */
+                   sizeof(void *);          /* fake return address */
+  if ((char *)current - required_space < (char *)stack_bottom)
+    goto fail;
+
+  // FIXME: all this casts are confusing. Review
+  
+  /* Push NULL terminator for argv[] array */
+  current = (char **)current - 1;
+  *(char **)current = NULL;
+  
+  /* Push argv[] array (pointers to argument strings) */
+  current = (char **)current - argc;
+  memcpy(current, argv, argc * sizeof(char *));
+
+  /* Push argv (pointer to argv[] array) */
+  char **argv_ptr = (char **)current;
+  current = (char ***)current - 1;
+  *(char ***)current = argv_ptr;
+  
+  /* Push argc */
+  current = (int *)current - 1;
+  *(int *)current = argc;
+  
+  /* Push fake return address */
+  current = (void **)current - 1;
+  *(void **)current = NULL;
+  
+  /* Set the stack pointer */
+  *esp = current;
+
+  // /* DEBUG print argc and argv */
+  // {
+  //   void **stack_ptr = (void **)*esp;
+  //   int debug_argc = *(int *)(stack_ptr + 1);
+  //   char **debug_argv = *(char ***)(stack_ptr + 2);
+    
+  //   printf("DEBUG: argc = %d\n", debug_argc);
+  //   for (int i = 0; i < debug_argc; i++) {
+  //     printf("DEBUG: argv[%d] = %s\n", i, debug_argv[i]);
+  //   }
+  // }
+  
+  return true;
+
+fail:
+  if (kpage != NULL) palloc_free_page (kpage);
+  return false;
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
