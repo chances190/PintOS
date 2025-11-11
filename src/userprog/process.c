@@ -236,24 +236,24 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
-  struct process_exec_status *my_status = cur->exec_status;
-  ASSERT (my_status != NULL);
+  struct process_exec_status *cur_status = cur->exec_status;
+  ASSERT (cur_status != NULL);
 
   DEBUG_PRINT("[process_exit] tid=%d exiting\n", cur->tid);
 
   /* Lock REQUIRED: both parent and child 
      access orphan/has_exited to decide who frees. */
-  lock_acquire(&my_status->lock);
-  my_status->has_exited = true;
-  bool orphan = my_status->orphan;
-  lock_release(&my_status->lock);
+  lock_acquire(&cur_status->lock);
+  cur_status->has_exited = true;
+  bool orphan = cur_status->orphan;
+  lock_release(&cur_status->lock);
   
   DEBUG_PRINT("[process_exit] %s\n", orphan
               ? "Parent gone, will free process_exec_status"
               : "Signaling parent (sema_up on wait_sema)");
   
-  if (orphan) free(my_status); /* Parent is gone. We own this structure now. */
-  else sema_up(&my_status->wait_sema); /* Parent is waiting. Signal it. */
+  if (orphan) free(cur_status); /* Parent is gone. We own this structure now. */
+  else sema_up(&cur_status->wait_sema); /* Parent is waiting. Signal it. */
 
 
   while (!list_empty(&cur->children))
@@ -290,18 +290,20 @@ process_exit (void)
      to the kernel-only page directory. */
   pd = cur->pagedir;
   if (pd != NULL) 
-    {
-      /* Correct ordering here is crucial.  We must set
-         cur->pagedir to NULL before switching page directories,
-         so that a timer interrupt can't switch back to the
-         process page directory.  We must activate the base page
-         directory before destroying the process's page
-         directory, or our active page directory will be one
-         that's been freed (and cleared). */
-      cur->pagedir = NULL;
-      pagedir_activate (NULL);
-      pagedir_destroy (pd);
-    }
+  {
+    /* Correct ordering here is crucial.  We must set
+        cur->pagedir to NULL before switching page directories,
+        so that a timer interrupt can't switch back to the
+        process page directory.  We must activate the base page
+        directory before destroying the process's page
+        directory, or our active page directory will be one
+        that's been freed (and cleared). */
+    cur->pagedir = NULL;
+    pagedir_activate (NULL);
+    pagedir_destroy (pd);
+  }
+
+  printf("%s: exit(%d)\n",cur->name, cur_status->exit_status);
 }
 
 /* Sets up the CPU for running user code in the current
