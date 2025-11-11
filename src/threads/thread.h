@@ -1,19 +1,20 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
 
+#include "threads/synch.h" /* for struct lock forward use */
+
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
-#include "threads/synch.h"  /* for struct lock forward use */
 
 /* States in a thread's life cycle. */
 enum thread_status
-  {
-    THREAD_RUNNING,     /* Running thread. */
-    THREAD_READY,       /* Not running but ready to run. */
-    THREAD_BLOCKED,     /* Waiting for an event to trigger. */
-    THREAD_DYING        /* About to be destroyed. */
-  };
+{
+  THREAD_RUNNING, /* Running thread. */
+  THREAD_READY,   /* Not running but ready to run. */
+  THREAD_BLOCKED, /* Waiting for an event to trigger. */
+  THREAD_DYING    /* About to be destroyed. */
+};
 
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
@@ -28,24 +29,24 @@ typedef int tid_t;
 #ifdef USERPROG
 /* Process identifier. */
 typedef int pid_t;
-#define PID_ERROR ((pid_t) -1)
+#  define PID_ERROR ((pid_t) -1)
 
 /* Structure to hold information about a child process that persists
    after the child thread exits. This allows the parent to wait for
    and retrieve the exit status of children that exit before wait() is called. */
 struct process_info
 {
-   pid_t pid;                          /* Process ID. */
-   int exit_status;                    /* Exit status code from process. */
-   bool has_exited;                    /* True if process has exited. */
-   bool waited_on;                     /* True if parent has already called wait(). */
-   bool orphan;                        /* True if parent process has already exited. */
-   struct list_elem elem;              /* List element linking to parent's process list. */
-   struct lock lock;                   /* Lock for synchronizing concurrent access to this structure. */
-   struct semaphore wait_sema;         /* Semaphore that parent waits on until process exits. */
+    pid_t pid;                  /* Process ID. */
+    int exit_status;            /* Exit status code from process. */
+    bool has_exited;            /* True if process has exited. */
+    bool waited_on;             /* True if parent has already called wait(). */
+    bool orphan;                /* True if parent process has already exited. */
+    struct list_elem elem;      /* List element linking to parent's process list. */
+    struct lock lock;           /* Lock for synchronizing concurrent access to this structure. */
+    struct semaphore wait_sema; /* Semaphore that parent waits on until process exits. */
 };
 
-#define FD_TABLE_SIZE 128              /* Maximum open files per process. */
+#  define FD_TABLE_SIZE 128              /* Maximum open files per process. */
 #endif
 
 /* A kernel thread or user process.
@@ -106,41 +107,41 @@ struct process_info
    blocked state is on a semaphore wait list. */
 struct thread
 {
-   /* Owned by thread.c. */
-   tid_t tid;                          /* Thread identifier. */
-   enum thread_status status;          /* Thread state. */
-   char name[16];                      /* Name (for debugging purposes). */
-   uint8_t *stack;                     /* Saved stack pointer. */
+    /* Owned by thread.c. */
+    tid_t tid;                 /* Thread identifier. */
+    enum thread_status status; /* Thread state. */
+    char name[16];             /* Name (for debugging purposes). */
+    uint8_t *stack;            /* Saved stack pointer. */
 
 #ifdef USERPROG
-   /* Owned by userprog/process.c. */
-   uint32_t *pagedir;                    /* Page directory. */
-   struct file *exec_file;               /* The executable file (with write denied). */
-   
-   /* File descriptor table. */
-   struct file *fd_table[FD_TABLE_SIZE]; /* Open files (fd 2-127; 0=stdin, 1=stdout). */
+    /* Owned by userprog/process.c. */
+    uint32_t *pagedir;      /* Page directory. */
+    struct file *exec_file; /* The executable file (with write denied). */
 
-   /* Process control. */
-   struct list children;                     /* List of process_info structures. */
-   struct process_info *proc_info;           /* Pointer to this thread's proc_info.
-                                                Ownership is shared with parent. */
-#endif   
-   /* Owned by thread.c */
-   struct list_elem allelem;           /* List element for all threads list. */
+    /* File descriptor table. */
+    struct file *fd_table[FD_TABLE_SIZE]; /* Open files (fd 2-127; 0=stdin, 1=stdout). */
 
-   /* Shared between thread.c and synch.c. */
-   struct list_elem elem;              /* List element (ready list / wait list). */
-   struct lock *waiting_on;            /* Lock this thread is waiting on (if any). */
-   struct list locks_held;             /* Locks currently held by this thread. */
+    /* Process control. */
+    struct list children;           /* List of process_info structures. */
+    struct process_info *proc_info; /* Pointer to this thread's proc_info.
+                                       Ownership is shared with parent. */
+#endif
+    /* Owned by thread.c */
+    struct list_elem allelem; /* List element for all threads list. */
 
-   /* Owned by thread.c. */
-   int priority;                       /* Priority. */
-   int base_priority;                  /* Original (non-donated) priority. */
+    /* Shared between thread.c and synch.c. */
+    struct list_elem elem;   /* List element (ready list / wait list). */
+    struct lock *waiting_on; /* Lock this thread is waiting on (if any). */
+    struct list locks_held;  /* Locks currently held by this thread. */
 
-   unsigned magic;                     /* Detects stack overflow. */
+    /* Owned by thread.c. */
+    int priority;      /* Priority. */
+    int base_priority; /* Original (non-donated) priority. */
 
-   /* Owned by thread.c */
-   int64_t wake_time;                  /* Time to wake up (in ticks). */
+    unsigned magic; /* Detects stack overflow. */
+
+    /* Owned by thread.c */
+    int64_t wake_time; /* Time to wake up (in ticks). */
 };
 
 /* If false (default), use round-robin scheduler.
@@ -148,40 +149,39 @@ struct thread
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
 
-void thread_init (void);
-void thread_start (void);
+void thread_init(void);
+void thread_start(void);
 
-void thread_tick (void);
-void thread_print_stats (void);
+void thread_tick(void);
+void thread_print_stats(void);
 
-typedef void thread_func (void *aux);
-tid_t thread_create (const char *name, int priority, thread_func *, void *);
+typedef void thread_func(void *aux);
+tid_t thread_create(const char *name, int priority, thread_func *, void *);
 
-void thread_block (void);
-void thread_unblock (struct thread *);
+void thread_block(void);
+void thread_unblock(struct thread *);
 
-struct thread *thread_current (void);
-tid_t thread_tid (void);
-const char *thread_name (void);
-struct thread *thread_get_by_tid (tid_t tid);
+struct thread *thread_current(void);
+tid_t thread_tid(void);
+const char *thread_name(void);
+struct thread *thread_get_by_tid(tid_t tid);
 
-void thread_exit (int status) NO_RETURN;
-void thread_yield (void);
+void thread_exit(int status) NO_RETURN;
+void thread_yield(void);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */
-typedef void thread_action_func (struct thread *t, void *aux);
-void thread_foreach (thread_action_func *, void *);
+typedef void thread_action_func(struct thread *t, void *aux);
+void thread_foreach(thread_action_func *, void *);
 
-bool thread_priority_less (const struct list_elem *a, const struct list_elem *b,
-                           void *aux);
-int thread_get_priority (void);
-void thread_set_priority (int);
-void thread_refresh_priority (void);
+bool thread_priority_less(const struct list_elem *a, const struct list_elem *b, void *aux);
+int thread_get_priority(void);
+void thread_set_priority(int);
+void thread_refresh_priority(void);
 
-int thread_get_nice (void);
-void thread_set_nice (int);
-int thread_get_recent_cpu (void);
-int thread_get_load_avg (void);
+int thread_get_nice(void);
+void thread_set_nice(int);
+int thread_get_recent_cpu(void);
+int thread_get_load_avg(void);
 
 
 #endif /* threads/thread.h */

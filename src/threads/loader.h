@@ -2,15 +2,15 @@
 #define THREADS_LOADER_H
 
 /* Constants fixed by the PC BIOS. */
-#define LOADER_BASE 0x7c00      /* Physical address of loader's base. */
-#define LOADER_END  0x7e00      /* Physical address of end of loader. */
+#define LOADER_BASE 0x7C00      /* Physical address of loader's base. */
+#define LOADER_END  0x7E00      /* Physical address of end of loader. */
 
 /* Physical address of kernel base. */
 #define LOADER_KERN_BASE 0x20000       /* 128 kB. */
 
 /* Kernel virtual address at which all physical memory is mapped.
    Must be aligned on a 4 MB boundary. */
-#define LOADER_PHYS_BASE 0xc0000000     /* 3 GB. */
+#define LOADER_PHYS_BASE 0xC0000000     /* 3 GB. */
 
 /* Important loader physical addresses. */
 #define LOADER_SIG (LOADER_END - LOADER_SIG_LEN)   /* 0xaa55 BIOS signature. */
@@ -31,7 +31,7 @@
 #define SEL_KDSEG       0x10    /* Kernel data selector. */
 
 #ifndef __ASSEMBLER__
-#include <stdint.h>
+#  include <stdint.h>
 
 /* Amount of physical memory, in 4 kB pages. */
 extern uint32_t init_ram_pages;

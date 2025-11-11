@@ -27,3 +27,10 @@ cscope.files::
 
 cscope:: cscope.files
 	cscope -b -q -k
+
+format:
+	@if command -v clang-format-22 >/dev/null 2>&1; then \
+		clang-format-22 -i $(shell find $(BUILD_SUBDIRS) -name '*.c' -o -name '*.h'); \
+	else \
+		echo "clang-format-22 not found. Please install clang-format-22 to use the format target."; \
+	fi

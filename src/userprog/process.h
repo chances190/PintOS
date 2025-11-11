@@ -16,9 +16,9 @@ typedef int mapid_t;
 #define EXIT_SUCCESS 0          /* Successful execution. */
 #define EXIT_FAILURE 1          /* Unsuccessful execution. */
 
-pid_t process_execute (const char *exec_string);
-int process_wait (pid_t child_pid);
-void process_exit (int status);
-void process_activate (void);
+pid_t process_execute(const char *exec_string);
+int process_wait(pid_t child_pid);
+void process_exit(int status);
+void process_activate(void);
 
 #endif /* userprog/process.h */

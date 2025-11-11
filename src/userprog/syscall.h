@@ -3,6 +3,6 @@
 
 #define PATH_MAX 512
 
-void syscall_init (void);
+void syscall_init(void);
 
 #endif /* userprog/syscall.h */
