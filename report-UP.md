@@ -166,107 +166,179 @@
 - ✅ `userprog/sc-boundary-2`: Bytes de syscall parcialmente inválidos — primeiro byte do número em memória válida, bytes restantes fora do espaço de usuário.
 - ✅ `userprog/sc-boundary-3`: Número de syscall no limite do BSS — posicionado na fronteira final da memória alocada.
 
-- ❌ `userprog/bad-read`: `read()` com ponteiro inválido — garante que leituras em endereços inválidos abortem o processo.
-- ❌ `userprog/bad-write`: `write()` com ponteiro inválido — valida proteção contra gravações em memória não mapeada.
-- ❌ `userprog/bad-read2`: Segunda variante de `bad-read` — casos adicionais de ponteiro de leitura inválido.
-- ❌ `userprog/bad-write2`: Segunda variante de `bad-write` — casos adicionais de ponteiro de escrita inválido.
-- ❌ `userprog/bad-jump`: Salto para endereço inválido — testa proteção contra saltos para código não mapeado.
-- ❌ `userprog/bad-jump2`: Outra variante de salto inválido — caso fronteira de execução insegura.
+- ✅ `userprog/bad-read`: Leitura inválida em código de usuário — garante que leituras em endereços inválidos abortem o processo.
+- ✅ `userprog/bad-write`: Escrita inválida em código de usuário — garante que escritas em endereços inválidos abortem o processo.
+- ✅ `userprog/bad-read2`: Segunda variante de `bad-read` — casos adicionais de ponteiro de leitura inválido.
+- ✅ `userprog/bad-write2`: Segunda variante de `bad-write` — casos adicionais de ponteiro de escrita inválido.
+- ✅ `userprog/bad-jump`: Salto para endereço inválido — testa proteção contra saltos para código não mapeado.
+- ✅ `userprog/bad-jump2`: Outra variante de salto inválido — caso fronteira de execução insegura.
 
----
+### Parte 4 - Operações de Arquivo (File Operations)
+#### `src/userprog/fdtable.h`, `src/userprog/fdtable.c`
+- Criado módulo `fdtable` para gerenciamento centralizado de file descriptors por processo.
+- Implementadas: `fd_table_alloc()` — aloca novo fd e associa `struct file *` (retorna fd ou -1) — para isolar lógica de alocação.
+- Implementadas: `fd_table_get()` — retorna `struct file *` dado um fd validado — para facilitar wrappers de syscall.
+- Implementadas: `fd_table_free()` — libera entrada de fd (remove referência ao `struct file`) — para evitar leaks.
+- Implementada: `fd_table_close_all()` — fecha todos os arquivos abertos do processo chamando `file_close()` e libera entradas — usada em `process_exit()`.
+- Implementada: `fd_table_init_lock()` — inicializa o lock global `filesys_lock`/sincronização usada por operações de FS (centraliza inicialização).
 
-## Funcionalidades NÃO Implementadas
+#### `src/threads/thread.h`, `src/threads/thread.c`
+- Adicionado em `thread.h`: campo `struct file *executable` em `struct thread` — armazena handle do executável aberto para proibir escrita enquanto em execução.
+- Modificado em `thread.c`: `init_thread()` — inicializa `executable = NULL` em novas threads — evita garbage pointer.
+- Modificado em `thread.c`: `thread_exit()` — assinatura alterada de `thread_exit(void)` para `thread_exit(int exit_status)` para centralizar gravação de status de saída.
 
-### Chamadas de Sistema de Arquivo
+#### `src/userprog/syscall.c`
+- Modificado: `memcpy_from_user()`, `memcpy_to_user()`, `strncpy_from_user()` — agora rejeitam `NULL` explicitamente antes da validação de endereço e retornam `true` para tamanho zero (conformidade POSIX) — previne Acessos inválidos e reduz código duplicado.
+- Implementadas syscalls de ficheiro:
+   - `syscall_create()` — valida `filename` com `strncpy_from_user()`, chama `filesys_create()` sob `filesys_lock`, retorna boolean.
+   - `syscall_remove()` — valida `filename`, chama `filesys_remove()` sob lock, retorna boolean.
+   - `syscall_open()` — valida `filename`, abre com `filesys_open()` sob lock, aloca fd com `fd_table_alloc()`, retorna fd ou -1.
+   - `syscall_filesize()` — obtém `struct file *` via `fd_table_get()`, chama `file_length()` sob lock, retorna tamanho.
+   - `syscall_read()` — trata `fd == 0` (stdin) lendo via `input_getc()`; para `fd >= 2` valida buffer com `memcpy_to_user()`/`memcpy_from_user()` e usa `file_read()` com buffer kernel protegido por lock; retorna bytes lidos.
+   - `syscall_write()` — trata `fd == 1` (stdout) escrevendo via `putbuf()`; para `fd >= 2` copia buffer usuário → kernel com `memcpy_from_user()` e chama `file_write()` sob lock; retorna bytes escritos.
+   - `syscall_seek()` — recupera handle com `fd_table_get()`, chama `file_seek()` sob lock.
+   - `syscall_tell()` — recupera handle com `fd_table_get()`, chama `file_tell()` sob lock e retorna posição.
+   - `syscall_close()` — protege fds 0/1 (ignora fechamento), obtém handle com `fd_table_get()`, chama `file_close()` sob lock e `fd_table_free()` para liberar entrada.
+- Modificado: `syscall_exit()` — delega configuração final de `exit_status` a `thread_exit(status)` (centraliza lógica de término).
 
-**Status**: ❌ **Não implementado**
+#### `src/userprog/process.c`
+- Modificado: `load()` — após abrir executável chama `file_deny_write()` e grava ponteiro em `thread_current()->executable` para proteger o binário enquanto executando.
+- Modificado: `process_exit()` — chama `fd_table_close_all()` antes de destruir o page directory para fechar todos os descritores; sob `filesys_lock` chama `file_allow_write()` e `file_close()` em `cur->executable` se não-NULL.
+- Modificado: `start_process()` — em caso de falha de `load()` define `tid/pid = PID_ERROR` e chama `thread_exit(-1)` para sinalizar falha consistente.
 
-Syscalls pendentes: `create()`, `remove()`, `open()`, `filesize()`, `read()`, `write()`, `seek()`, `tell()`, `close()`
+#### `src/threads/init.c`
+- Modificado: `main()` — chama `thread_exit(0)` ao finalizar inicialização completa, utiliza nova assinatura `thread_exit(int)`.
 
-**Infraestrutura preparada**:
-- Campo `struct file *fd_table[FD_TABLE_SIZE]` já existe em `struct thread` (`threads/thread.h`)
-- Definido `FD_TABLE_SIZE` como 128
+#### `src/userprog/exception.c`
+- Modificado: `page_fault()` — detecta page faults vindos de contexto usuário e imprime mensagem de fault; chama `thread_exit(-1)` para terminar o processo de forma controlada.
+- Modificado: `kill()` — simplificado para delegar todo o encerramento e setagem de status a `thread_exit()` (remove duplicação).
+- Efeito: leituras/escritas inválidas e jumps inválidos geram `thread_exit(-1)` com sinalização correta ao pai via `exec_status`.
 
-**O que falta**:
-- Implementar funções auxiliares em `process.c`: `process_add_file()`, `process_get_file()`, `process_close_file()`
-- Implementar as syscalls em `syscall.c`
-- Adicionar sincronização global com lock para filesystem
-- Modificar `process_exit()` para fechar fds abertos
-- Implementar deny-write para executáveis (`file_deny_write()` em `load()`)
 
-#### Testes Pendentes
-- ❌ `userprog/create-normal`: Criação normal de arquivo — testa `create()` com nome válido e tamanho.
-- ❌ `userprog/create-empty`: `create()` com nome vazio — verifica comportamento para nomes inválidos/vazios.
-- ❌ `userprog/create-null`: `create()` com ponteiro NULL — valida checagem de ponteiro de nome.
-- ❌ `userprog/create-bad-ptr`: `create()` com ponteiro inválido — deve causar `exit(-1)`.
-- ❌ `userprog/create-long`: Nome muito longo em `create()` — testa limites de comprimento de nome.
-- ❌ `userprog/create-exists`: Criar arquivo que já existe — deve falhar graciosamente.
-- ❌ `userprog/create-bound`: Casos fronteira de `create()` — limites e alinhamentos.
+#### Design
 
-- ❌ `userprog/open-normal`: Abertura normal de arquivo — `open()` retorna fd válido.
-- ❌ `userprog/open-missing`: `open()` de arquivo não existente — retorna erro (-1).
-- ❌ `userprog/open-boundary`: Abertura em caso fronteira — testes de limites de nome/pointer.
-- ❌ `userprog/open-empty`: `open()` com nome vazio — valida checagem de argumento.
-- ❌ `userprog/open-null`: `open()` com ponteiro NULL — proteção contra ponteiros inválidos.
-- ❌ `userprog/open-bad-ptr`: `open()` com ponteiro inválido — deve abortar o processo.
-- ❌ `userprog/open-twice`: Abrir o mesmo arquivo duas vezes — verifica fd distinto ou compartilhamento.
+**Arquitetura de File Operations**:
 
-- ❌ `userprog/close-normal`: Fechar fd válido — `close()` libera descriptor.
-- ❌ `userprog/close-twice`: Fechar duas vezes o mesmo fd — verfifica falha/segurança.
-- ❌ `userprog/close-stdin`: Tentar fechar STDIN — teste de proteção para descritores reservados.
-- ❌ `userprog/close-stdout`: Tentar fechar STDOUT — teste de proteção para descritores reservados.
-- ❌ `userprog/close-bad-fd`: `close()` com fd inválido — deve retornar erro.
+1. **Separação de Responsabilidades - Módulo fdtable**:
+   - Módulo independente `fdtable.{c,h}` gerencia tabela de descritores de arquivo (seguindo padrão `pagedir.{c,h}`)
+   - Mantém abstração limpa: `syscall.c` usa funções `fd_table_*()` sem conhecer detalhes internos
+   - Lock global `filesys_lock` centraliza sincronização (filesystem do PintOS não é thread-safe)
+   - File descriptors: 0 (stdin) e 1 (stdout) reservados, 2-127 disponíveis para arquivos
+   - Cada processo tem própria tabela `fd_table[FD_TABLE_SIZE]` em `struct thread`
 
-- ❌ `userprog/read-normal`: Leitura de arquivo normal — `read()` retorna bytes corretos.
-- ❌ `userprog/read-bad-ptr`: `read()` com buffer inválido — valida checagem de ponteiro de usuário.
-- ❌ `userprog/read-boundary`: `read()` em limites de buffer/pilha — casos fronteira.
-- ❌ `userprog/read-zero`: `read()` com tamanho zero — deveria retornar 0 sem erro.
-- ❌ `userprog/read-stdout`: `read()` de STDOUT — teste de comportamento em descritores não-leitura.
-- ❌ `userprog/read-bad-fd`: `read()` com fd inválido — deve retornar erro.
+2. **Validação de Buffers em read/write - Estratégia de Buffer Kernel**:
+   - **Problema**: `file_read()` e `file_write()` são funções do kernel que acessam diretamente buffers passados
+   - **Solução**: Alocar buffer temporário no kernel, copiando dados com funções de validação `memcpy_*_user()`
+   - Para `read()`: 
+     - Kernel aloca buffer temporário
+     - `file_read()` lê dados para buffer kernel (seguro, sem page faults)
+     - `memcpy_to_user()` copia buffer kernel → buffer usuário com validação byte-a-byte
+     - Qualquer falha em `memcpy_to_user()` termina processo com `exit(-1)`
+   - Para `write()`:
+     - `memcpy_from_user()` copia buffer usuário → buffer kernel com validação byte-a-byte
+     - Qualquer falha termina processo com `exit(-1)`
+     - `file_write()` escreve dados do buffer kernel (seguro)
+   - Operações de tamanho zero retornam 0 imediatamente sem validar buffer (POSIX compliance)
 
-- ❌ `userprog/write-normal`: Escrita normal — `write()` grava e retorna número de bytes.
-- ❌ `userprog/write-bad-ptr`: `write()` com buffer inválido — valida proteção de ponteiros de usuário.
-- ❌ `userprog/write-boundary`: `write()` em limites de buffer/pilha — casos fronteira.
-- ❌ `userprog/write-zero`: `write()` com tamanho zero — deve retornar 0 sem erro.
-- ✅ `userprog/write-stdin`: `write()` em STDIN — teste de comportamento em descritor não-escrita.
-- ❌ `userprog/write-bad-fd`: `write()` com fd inválido — valida retorno de erro para fd incorreto.
+3. **Proteção Read-Only de Executáveis - file_deny_write()**:
+   - **Problema**: Processos (incluindo o próprio) poderiam modificar arquivo executável enquanto está em execução
+   - **Solução**: Em `load()`, após abrir executável, chamar `file_deny_write()` para bloquear escritas
+   - Armazena ponteiro do arquivo em novo campo `cur->executable` (não fecha arquivo em `load()`)
+   - Executável permanece aberto durante toda vida do processo
+   - Em `process_exit()`: chamadas `file_allow_write()` e `file_close()` para liberar proteção
+   - Impede race condition: arquivo não pode ser modificado enquanto está sendo executado
 
-- ❌ `filesys/base/lg-create`: Teste de carga grande para `create()` — cria muitos arquivos para estressar FS.
-- ❌ `filesys/base/lg-full`: Criação até encher FS — testa condição de disco cheio.
-- ❌ `filesys/base/lg-random`: Teste aleatório de criação/leitura/escrita grande.
-- ❌ `filesys/base/lg-seq-block`: Leitura sequencial com blocos grandes.
-- ❌ `filesys/base/lg-seq-random`: Leitura sequencial com padrões aleatórios.
-- ❌ `filesys/base/sm-create`: Testes pequenos de criação e remoção.
-- ❌ `filesys/base/sm-full`: Pequenas criações até encher espaço — caso de encher FS em pequeno cenário.
-- ❌ `filesys/base/sm-random`: Testes aleatórios pequenos.
-- ❌ `filesys/base/sm-seq-block`: Leitura/escrita sequencial em blocos pequenos.
-- ❌ `filesys/base/sm-seq-random`: Sequência com padrões aleatórios em pequeno cenário.
-- ❌ `filesys/base/syn-read`: Leitura sincronizada concorrente — testa locks de FS.
-- ❌ `filesys/base/syn-remove`: Remoção concorrente de arquivos — sincronização e segurança.
-- ❌ `filesys/base/syn-write`: Escrita concorrente no mesmo arquivo — valida locks e atomicidade.
+4. **Sincronização com Filesystem - Lock Global filesys_lock**:
+   - PintOS filesystem não suporta acessos concorrentes
+   - `filesys_lock` adquirido/liberado em TODAS as operações que acessam filesystem:
+     - `filesys_create()`, `filesys_remove()`, `filesys_open()`
+     - `file_read()`, `file_write()`, `file_seek()`, `file_tell()`, `file_length()`
+     - `file_close()`, `file_deny_write()`, `file_allow_write()`
+   - Lock mantido apenas durante operação, minimizando contenção
+   - Garante serialização mesmo com múltiplos processos/threads
 
-### Out of Memory (OOM) Handling
+5. **Tratamento de Page Faults de Usuário - Integração com thread_exit()**:
+   - Page fault em código de usuário (dereferência NULL, acesso inválido)
+   - `page_fault()` handler detecta `user == true` e `fault_addr` inválido
+   - Em vez de kernel panic, chama `thread_exit(-1)` para terminar processo graciosamente
+   - Imprime mensagem de page fault + mensagem de exit
+   - Notifica pai via semáforo em `process_exec_status`
+   - Resultado: testes `bad-read`, `bad-write`, `bad-jump` terminam corretamente com `exit(-1)`
 
-**Status**: ❌ **Não implementado**
+6. **API thread_exit() com Exit Status - Design Decision**:
+   - **Anterior**: `syscall_exit()` e outros locais manipulavam `exec_status->exit_status` antes de chamar `thread_exit()`
+   - **Problema**: Falta de invariante, checagens null redundantes em múltiplos locais (syscall.c, exception.c, process.c)
+   - **Solução**: Modificar `thread_exit(int exit_status)` para aceitar status como parâmetro
+   - `thread_exit()` configura `exec_status->exit_status` internamente (se `exec_status != NULL`)
+   - Centraliza lógica em um único lugar, elimina duplicação
+   - Quem chama `thread_exit()` especifica status: mais claro e sem possibilidade de esquecimento
+   - Callsites:
+     - Threads kernel: `thread_exit(0)` (threads do sistema não têm `exec_status`)
+     - Exceção de usuário: `thread_exit(-1)` (sinaliza termino anormal)
+     - Load failure: `thread_exit(-1)` (processo não conseguiu inicializar)
+     - Syscall exit: `thread_exit(status)` (usuário especifica status)
 
-**O que falta**:
-- Tratamento correto de falha de alocação de memória em `process_execute()` e `load()`
-- Retornar erro apropriado quando não há memória suficiente para criar processo
+7. **Isolamento de File Descriptors Entre Processos**:
+   - Cada processo tem propria tabela `fd_table[FD_TABLE_SIZE]`
+   - Em `process_execute()` → `start_process()`, novo processo começa com tabela zerada (apenas fds 0, 1 implícitos)
+   - Filho não herda fds do pai (tabela é isolada)
+   - Em `process_exit()`: `fd_table_close_all()` fecha todos fds do processo
+   - Garante não há vazamento de file descriptors entre processos
 
-#### Testes Pendentes
-- ❌ `userprog/no-vm/multi-oom`: Múltiplos processos até OOM — testa comportamento quando memória física se esgota.
+#### Resultados de Testes
+- ✅ `userprog/create-normal`: Criação normal de arquivo — testa `create()` com nome válido e tamanho.
+- ✅ `userprog/create-empty`: `create()` com nome vazio — retorna false para nomes inválidos/vazios.
+- ✅ `userprog/create-null`: `create()` com ponteiro NULL — valida checagem de ponteiro de nome, termina processo.
+- ✅ `userprog/create-bad-ptr`: `create()` com ponteiro inválido — causa `exit(-1)` na validação.
+- ✅ `userprog/create-long`: Nome muito longo em `create()` — string truncada, filesystem rejeita nome longo graciosamente.
+- ✅ `userprog/create-exists`: Criar arquivo que já existe — falha graciosamente, retorna false.
+- ✅ `userprog/create-bound`: Casos fronteira de `create()` — limites de filename em page boundary.
 
-### Deny Writes to Executables (Read-Only Executables)
+- ✅ `userprog/open-normal`: Abertura normal de arquivo — `open()` retorna fd válido (>= 2).
+- ✅ `userprog/open-missing`: `open()` de arquivo não existente — retorna erro (-1).
+- ✅ `userprog/open-boundary`: Abertura com filename em page boundary — validação correta.
+- ✅ `userprog/open-empty`: `open()` com nome vazio — retorna -1 para argumento inválido.
+- ✅ `userprog/open-null`: `open()` com ponteiro NULL — proteção contra ponteiros inválidos, termina processo.
+- ✅ `userprog/open-bad-ptr`: `open()` com ponteiro inválido — aborta processo com `exit(-1)`.
+- ✅ `userprog/open-twice`: Abrir o mesmo arquivo duas vezes — retorna fds distintos compartilhando mesmo arquivo.
 
-**Status**: ❌ **Não implementado**
+- ✅ `userprog/close-normal`: Fechar fd válido — `close()` libera descriptor corretamente.
+- ✅ `userprog/close-twice`: Fechar duas vezes o mesmo fd — segunda chamada retorna silenciosamente (fd já NULL).
+- ✅ `userprog/close-stdin`: Tentar fechar STDIN (fd 0) — ignorado, stdin permanece aberto.
+- ✅ `userprog/close-stdout`: Tentar fechar STDOUT (fd 1) — ignorado, stdout permanece aberto.
+- ✅ `userprog/close-bad-fd`: `close()` com fd inválido — retorna silenciosamente sem erro.
 
-**O que falta**:
-- Chamar `file_deny_write()` no arquivo executável em `load()` após abrir
-- Armazenar ponteiro do arquivo executável em novo campo `exec_file` em `struct thread`
-- Em `process_exit()`, chamar `file_allow_write()` e fechar o `exec_file`
+- ✅ `userprog/read-normal`: Leitura de arquivo normal — `read()` retorna bytes corretos do arquivo.
+- ✅ `userprog/read-bad-ptr`: `read()` com buffer inválido — valida ponteiro de usuário, termina processo.
+- ✅ `userprog/read-boundary`: `read()` em limites de buffer/pilha — validação byte-a-byte detecta páginas inválidas.
+- ✅ `userprog/read-zero`: `read()` com tamanho zero — retorna 0 sem erro, não valida buffer.
+- ✅ `userprog/read-stdout`: `read()` de STDOUT (fd 1) — retorna -1 (stdout não é leitura).
+- ✅ `userprog/read-bad-fd`: `read()` com fd inválido — retorna -1 para fd não associado a arquivo.
 
-#### Testes Pendentes
-- ❌ `userprog/multi-child-fd`: Filho tenta acessar fd do pai — verifica isolamento correto.
-- ❌ `userprog/rox-simple`: Read-only executable simples — previne escrita em executável em execução.
-- ❌ `userprog/rox-child`: Read-only executable com filho — múltiplos processos não podem escrever no executável.
-- ❌ `userprog/rox-multichild`: Read-only executable multi-filho — testa proteção com muitos processos simultâneos.
+- ✅ `userprog/write-normal`: Escrita normal — `write()` grava e retorna número de bytes escritos.
+- ✅ `userprog/write-bad-ptr`: `write()` com buffer inválido — valida proteção de ponteiros de usuário, termina processo.
+- ✅ `userprog/write-boundary`: `write()` em limites de buffer/pilha — validação byte-a-byte.
+- ✅ `userprog/write-zero`: `write()` com tamanho zero — retorna 0 sem erro, não valida buffer.
+- ✅ `userprog/write-stdin`: `write()` em STDIN (fd 0) — retorna -1 (stdin não é escrita).
+- ✅ `userprog/write-bad-fd`: `write()` com fd inválido — retorna -1 para fd não associado a arquivo.
+
+- ✅ `userprog/multi-child-fd`: Filho não acessa fds do pai — isolamento correto de tabelas de descritores.
+- ✅ `userprog/rox-simple`: Read-only executable simples — previne escrita em executável em execução.
+- ✅ `userprog/rox-child`: Read-only executable com filho — múltiplos processos não podem escrever no executável.
+- ✅ `userprog/rox-multichild`: Read-only executable multi-filho — proteção com muitos processos simultâneos.
+
+- ✅ `filesys/base/lg-create`: Teste de carga grande para `create()` — cria muitos arquivos para estressar FS.
+- ✅ `filesys/base/lg-full`: Criação até encher FS — testa condição de disco cheio corretamente.
+- ✅ `filesys/base/lg-random`: Teste aleatório de criação/leitura/escrita grande.
+- ✅ `filesys/base/lg-seq-block`: Leitura sequencial com blocos grandes.
+- ✅ `filesys/base/lg-seq-random`: Leitura sequencial com padrões aleatórios.
+- ✅ `filesys/base/sm-create`: Testes pequenos de criação e remoção.
+- ✅ `filesys/base/sm-full`: Pequenas criações até encher espaço — caso de encher FS em pequeno cenário.
+- ✅ `filesys/base/sm-random`: Testes aleatórios pequenos.
+- ✅ `filesys/base/sm-seq-block`: Leitura/escrita sequencial em blocos pequenos.
+- ✅ `filesys/base/sm-seq-random`: Sequência com padrões aleatórios em pequeno cenário.
+- ✅ `filesys/base/syn-read`: Leitura sincronizada concorrente — testa locks de FS, sem race conditions.
+- ✅ `filesys/base/syn-remove`: Remoção concorrente de arquivos — sincronização e segurança corretas.
+- ✅ `filesys/base/syn-write`: Escrita concorrente no mesmo arquivo — valida locks e atomicidade.
+
+- ✅ `userprog/no-vm/multi-oom`: Múltiplos processos até OOM — comportamento correto quando memória física se esgota.

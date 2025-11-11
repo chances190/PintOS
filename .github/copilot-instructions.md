@@ -140,30 +140,50 @@ src/
 
 ### Required Report Content (in PT-BR)
 
-**IMPORTANT**: Report contents are organized by FUNCTIONALITY, not by phase. Each functionality gets its own section with modified files, design explanation, and test results.
+**IMPORTANT**: Reports must be written in Portuguese (PT-BR). The report structure is organized by FUNCTIONALITY (not by phase). Each functionality must be a separate section containing Modified Files, Design, and Test Results.
 
 Each functionality section must contain:
 
-1. **Section Header** (`### Parte X: Feature Name`):
-   - Group related features together (e.g., "Alarm Clock", "Priority Scheduling", "Argument Passing")
-   - Brief overview of what was implemented
+1. Section Header
+   - Format: `### Parte X: Feature Name`
+   - Provide a short overview of what was implemented for this functionality.
 
-2. **Modified Files Subsection** (`#### src/path/to/file.c, src/path/to/file.h`):
-   - List ALL modified files with full path for THIS functionality
-   - Describe changes made to each file with bullet points
-   - Include new fields added to structs, new functions created, modified logic
+2. Modified Files Subsections
+   - Create one subsection per modified file title. You may group a .c and its corresponding .h under a single subsection but the subsection title must be the file path(s) (e.g., `#### src/userprog/process.c, src/userprog/process.h`).
+   - For each subsection, use bullet points that start with clear action verbs (e.g., "Added", "Modified", "Removed", "Renamed", "Refactored", "Fixed", "Documented") to describe exactly what was changed.
+   - Specify which functions, methods, macros, and struct fields were added, modified, or removed. Use the exact symbol names.
+   - For each change, include the intent / purpose in a short clause (e.g., "Added function foo() to validate user pointers and prevent kernel crashes").
+   - If a struct was extended, list added fields and state why they were added and how they are used.
+   - Example layout:
+     - `#### src/userprog/process.c, src/userprog/process.h`
+       - Added: `process_execute()` — starts a user process with validated argv parsing.
+       - Modified: `load()` — now supports lazy stack growth to avoid eager allocation.
+       - Changed struct `process` — added `exit_status` (int) to store child exit codes for wait().
 
-3. **Design Subsection** (`#### Design`):
-   - Explain the overall architecture and approach for THIS functionality
-   - Describe key algorithms and data structures used
-   - Include step-by-step flow for main operations
-   - Use numbered lists for sequential processes
+3. Design Subsection
+   - Title: `#### Design`
+   - Provide a holistic description of the implementation and the rationale behind major design decisions.
+   - Include:
+     - Overall architecture and data flow (how components interact).
+     - Key algorithms and data structures used.
+     - Important invariants, synchronization strategy, and failure modes considered.
+     - Explicit design decisions and trade-offs (e.g., why choose eager vs lazy allocation, single lock vs fine-grained locks, data structure X over Y), and the impact of those decisions on correctness, performance, and testability.
+     - Step-by-step flows for core operations, numbered (e.g., 1. on syscall entry -> 2. validate -> 3. lock -> 4. perform operation -> 5. unlock -> 6. return).
+     - Any assumptions and limitations.
+   - Be precise and justify why each major approach was chosen.
 
-4. **Test Results Subsection** (`#### Resultados de Testes`):
-   - List ALL tests for THIS specific functionality
-   - Use ✅ for passing tests, ❌ for failing tests
-   - Format: `- ✅ test-name: Brief description of what test validates`
-   - Only include tests related to this functionality
+4. Test Results Subsection
+   - Title: `#### Resultados de Testes`
+   - List all tests relevant to this functionality only.
+   - Use the format:
+     - `- ✅/❌ test-name: Brief description of what the test validates`
+   - If a test fails even tough the functionality was already implemented, include the failing output path (e.g., `build/tests/<phase>/<test>.output`) and a concise note about suspected cause.
+
+Formatting and content rules (mandatory)
+- Keep each Modified Files subsection focused: one title per subsection, action-verb bullets, exact symbol names, and purpose clauses.
+- The Design subsection must emphasize design decisions and trade-offs; do not only restate implementation steps.
+- All report text must be in Portuguese (PT-BR). Code, function names, and file paths may remain in English.
+- Keep entries concise but informative: each bullet should communicate a single change or decision.
 
 ## Development Workflow
 
@@ -192,8 +212,9 @@ Each functionality section must contain:
     - For file system issues, inspect `filesys.dsk` with `xxd`, `hexdump`, or `dd`
 
 6. **Update the implementation report**:
-    - After verifying sucess, document changes in corresponding `report-<PHASE>.md`
-    - Include detailed information about modified files, design approach, and test results in Portuguese (PT-BR)
+   - After verifying success on tests, document changes in the corresponding `report-<PHASE>.md`
+   - Before writing the report, check the diff from `Base_Dev` branch to ensure all changes are captured
+   - Include detailed information about modified files, design approach, and test results in Portuguese (PT-BR)
 
 ## Trust The User. Trust These Instructions.
 
