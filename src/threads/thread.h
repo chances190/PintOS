@@ -33,7 +33,7 @@ typedef int pid_t;
 /* Structure to hold information about a child process that persists
    after the child thread exits. This allows the parent to wait for
    and retrieve the exit status of children that exit before wait() is called. */
-struct process_exec_status
+struct process_info
 {
    pid_t pid;                          /* Process ID. */
    int exit_status;                    /* Exit status code from process. */
@@ -121,8 +121,8 @@ struct thread
    struct file *fd_table[FD_TABLE_SIZE]; /* Open files (fd 2-127; 0=stdin, 1=stdout). */
 
    /* Process control. */
-   struct list children;                     /* List of process_exec_status structures. */
-   struct process_exec_status *exec_status;  /* Pointer to this thread's exec_status.
+   struct list children;                     /* List of process_info structures. */
+   struct process_info *proc_info;           /* Pointer to this thread's proc_info.
                                                 Ownership is shared with parent. */
 #endif   
    /* Owned by thread.c */
@@ -165,7 +165,7 @@ tid_t thread_tid (void);
 const char *thread_name (void);
 struct thread *thread_get_by_tid (tid_t tid);
 
-void thread_exit (void) NO_RETURN;
+void thread_exit (int status) NO_RETURN;
 void thread_yield (void);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */

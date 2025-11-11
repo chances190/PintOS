@@ -280,7 +280,7 @@ syscall_handler (struct intr_frame *f)
     }
 
     default:
-      thread_exit();
+      thread_exit(-1);
       break;
   }
 }
@@ -424,10 +424,7 @@ static void
 syscall_exit(int status)
 {
   struct thread *cur = thread_current ();
-  DEBUG_PRINT("[syscall_exit] tid=%d exiting with status %d\n", cur->tid, status);
-  cur->exec_status->exit_status = status;
-  printf("%s: exit(%d)\n", cur->name, status);
-  thread_exit();
+  thread_exit(status);
 }
 
 static pid_t
