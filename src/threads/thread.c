@@ -12,6 +12,10 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #ifdef USERPROG
+/* Note: This creates a dependency from kernel code to the user program subsystem.
+   In user program mode, kernel threads may represent user processes that need
+   special cleanup in process_exit(). This is a layering compromise in PintOS's
+   design for educational simplicity. */
 #include "userprog/process.h"
 #endif
 
@@ -314,12 +318,12 @@ thread_get_by_tid (tid_t tid)
 /* Deschedules the current thread and destroys it.  Never
    returns to the caller. */
 void
-thread_exit (void) 
+thread_exit (int status) 
 {
   ASSERT (!intr_context ());
 
 #ifdef USERPROG
-  process_exit ();
+  process_exit (status);
 #endif
 
   /* Remove thread from all threads list, set our status to dying,
@@ -502,7 +506,7 @@ kernel_thread (thread_func *function, void *aux)
 
   intr_enable ();       /* The scheduler runs with interrupts off. */
   function (aux);       /* Execute the thread function. */
-  thread_exit ();       /* If function() returns, kill the thread. */
+  thread_exit (0);      /* If function() returns, kill the thread. */
 }
 
 /* Returns the running thread. */
@@ -549,10 +553,10 @@ init_thread (struct thread *t, const char *name, int priority)
   t->wake_time = 0;
 
 #ifdef USERPROG
+  t->pagedir = NULL;
+  t->exec_file = NULL;
   list_init (&t->children);
-  t->exec_status = NULL;
-  
-  /* Initialize file descriptor table. */
+  t->proc_info = NULL;
   for (int i = 0; i < FD_TABLE_SIZE; i++)
     t->fd_table[i] = NULL;
 #endif

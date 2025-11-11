@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "userprog/fdtable.h"
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
@@ -21,11 +22,12 @@
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *exec_string, void (**eip) (void), void **esp);
+static struct process_info* process_exec_status_init();
 
 struct start_process_args 
 {
   char *exec_string;
-  struct process_exec_status *child_stat;
+  struct process_info *proc_info;
 };
 
 /* Starts a new thread running a user program loaded with
@@ -40,7 +42,7 @@ process_execute (const char *exec_string)
   tid_t tid;
   struct thread *cur = thread_current ();
   struct thread *child;
-  struct process_exec_status *child_stat;
+  struct process_info *child_exec_status;
 
   /* Make a copy of FILE_NAME for the child process
   (first token before space) */
@@ -59,55 +61,52 @@ process_execute (const char *exec_string)
   }
   strlcpy (exec_string_cp, exec_string, PGSIZE);
 
-  /* Create a CHILD_STATUS struct for the child process. */
+  /* Create an EXEC_STATUS struct for the child process. */
   DEBUG_PRINT("[process_execute] Creating child status\n");
-  child_stat = malloc(sizeof(struct process_exec_status));
-  if (child_stat == NULL)
+  child_exec_status = process_exec_status_init();
+  if (child_exec_status == NULL)
   {
     palloc_free_page(filename);
     palloc_free_page(exec_string_cp);
     return PID_ERROR;
   }
-  child_stat->pid = PID_ERROR;  /* Will be set after thread_create. */
-  child_stat->exit_status = -1;
-  child_stat->has_exited = false;
-  child_stat->waited_on = false;
-  child_stat->orphan = false;
-  sema_init(&child_stat->wait_sema, 0);
-  lock_init(&child_stat->lock);
   
   /* Pack the arguments of start_process into a struct*/
   struct start_process_args *args = malloc(sizeof(struct start_process_args));
   if (args == NULL) {
-    free(child_stat);
+    free(child_exec_status);
     palloc_free_page(filename);
     palloc_free_page(exec_string_cp);
     return PID_ERROR;
   }
   args->exec_string = exec_string_cp;
-  args->child_stat = child_stat;
+  args->proc_info = child_exec_status;
   
-  /* Create a new thread to execute FILENAME. */
+  /* Create a new thread to execute FILENAME as an user process. */
   DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", filename);
   tid = thread_create(filename, PRI_DEFAULT, start_process, args);
   palloc_free_page(filename);
-  if (tid == TID_ERROR) 
+  if (tid == TID_ERROR)
   {
+    /* Couldn't create thread for child process */
     DEBUG_PRINT("[process_execute] thread_create failed\n");
-    free(child_stat);
+    free(child_exec_status);
     palloc_free_page(exec_string_cp);
     free(args);
     return PID_ERROR;
   }
-  DEBUG_PRINT("[process_execute] Thread created with tid=%d\n", tid);
-  list_push_back(&cur->children, &child_stat->elem);
+  
+  /* Add the new process as a child of the current process. */
+  DEBUG_PRINT("[process_execute] Process created with pid=%d\n", tid);
+  list_push_back(&cur->children, &child_exec_status->elem);
   
   /* Wait for child to finish loading. */
   DEBUG_PRINT("[process_execute] Waiting for child to load...\n");
-  sema_down (&child_stat->wait_sema);
+  sema_down (&child_exec_status->wait_sema);
 
-  if (child_stat->has_exited && child_stat->exit_status == -1)
+  if (child_exec_status->exit_status == -1) 
   {
+    /* Couldn't initialize child process. */
     DEBUG_PRINT("[process_execute] Load failed\n");
     return PID_ERROR;
   }
@@ -123,44 +122,33 @@ start_process (void *args_)
 {
   struct start_process_args *args = args_;
   char *exec_string = args->exec_string;
-  struct process_exec_status *child_stat = args->child_stat;
-  
-  struct intr_frame if_;
-  bool success;
+  struct process_info *proc_info = args->proc_info;
   
   struct thread *cur = thread_current ();
-  cur->exec_status = child_stat;
-  cur->exec_status->pid = cur->tid;
-
-  DEBUG_PRINT("[start_process] tid=%d starting, exec_string='%s'\n", cur->tid, exec_string);
-
+  cur->proc_info = args->proc_info;
+  proc_info->pid = cur->tid;
+  DEBUG_PRINT("[start_process] pid=%d starting, exec_string='%s'\n", 
+              proc_info->pid, exec_string);
+  
   /* Initialize interrupt frame and load executable. */
+  struct intr_frame if_;
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   
   DEBUG_PRINT("[start_process] Calling load()...\n");
-  success = load (exec_string, &if_.eip, &if_.esp);
-  DEBUG_PRINT("[start_process] load() returned %d\n", success);
+  bool ret = load (exec_string, &if_.eip, &if_.esp);
+  DEBUG_PRINT("[start_process] load() returned %d\n", ret);
   palloc_free_page (exec_string);
   free(args);
   
-  if (!success)
-  {
-    /* Load failed - mark as exited with -1. */
-    cur->exec_status->has_exited = true;
-    cur->exec_status->exit_status = -1;
-  }
+  if (ret) proc_info->exit_status = 0;
   
   DEBUG_PRINT("[start_process] Signaling parent (sema_up on wait_sema)\n");
-  sema_up (&cur->exec_status->wait_sema);
+  sema_up (&proc_info->wait_sema);
   
-  if (!success)
-  {
-    DEBUG_PRINT("[start_process] Load failed, exiting with status -1\n");
-    thread_exit ();
-  }
+  if (!ret) thread_exit (-1);
 
   DEBUG_PRINT("[start_process] Jumping to user mode...\n");
   /* Start the user process by simulating a return from an
@@ -183,116 +171,129 @@ start_process (void *args_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (pid_t child_tid) 
+process_wait (pid_t child_pid) 
 {
   struct thread *cur = thread_current ();
-  struct process_exec_status *child_stat = NULL;
-  struct list_elem *e;
-  int exit_status;
-  bool should_wait;
+  struct process_info *child_info = NULL;
   
-  DEBUG_PRINT("[process_wait] tid=%d waiting for child_tid=%d\n", cur->tid, child_tid);
+  DEBUG_PRINT("[process_wait] tid=%d waiting for child_pid=%d\n", 
+              cur->proc_info->pid, child_pid);
   
-  /* Find the process_exec_status with the given TID. */
-  for (e = list_begin (&cur->children); e != list_end (&cur->children);
-       e = list_next (e))
+  /* Find the process_info with the given PID. */
+  for (struct list_elem* e = list_begin (&cur->children); 
+       e != list_end (&cur->children); e = list_next (e))
   {
-    struct process_exec_status *cs = list_entry (e, struct process_exec_status, elem);
-    if (cs->pid == child_tid)
+    struct process_info *ci = list_entry (e, struct process_info, elem);
+    if (ci->pid == child_pid)
     {
-      child_stat = cs;
+      child_info = ci;
       break;
     }
   }
-  
-  /* Return -1 if no such child. */
-  if (child_stat == NULL)
+  if (child_info == NULL)
   {
     DEBUG_PRINT("[process_wait] Child not found, returning -1\n");
     return -1;
   }
   
   /* Check if already waited on this child. */
-  if (child_stat->waited_on)
+  if (child_info->waited_on)
   {
     DEBUG_PRINT("[process_wait] Already waited on this child, returning -1\n");
     return -1;
   }
   
   /* Mark as waited on and wait unconditionally. */
-  DEBUG_PRINT("[process_wait] Waiting for child to exit (sema_down on wait_sema)...\n");
-  child_stat->waited_on = true;
-  sema_down (&child_stat->wait_sema);
+  DEBUG_PRINT("[process_wait] Waiting for child to exit...\n");
+  child_info->waited_on = true;
+  sema_down (&child_info->wait_sema);
   
-  exit_status = child_stat->exit_status;  
-  list_remove (&child_stat->elem);
-  free(child_stat);
+  int exit_status = child_info->exit_status;  
+  list_remove (&child_info->elem);
+  free(child_info);
   
   DEBUG_PRINT("[process_wait] Child exited with status %d\n", exit_status);
   return exit_status;
 }
 
-/* Free the current process's resources. */
+/* Free the current process's resources. 
+   Without zombie thread list, this leaks memory btw */ // TODO: fix
 void
-process_exit (void)
+process_exit (int status)
 {
   struct thread *cur = thread_current ();
-  uint32_t *pd;
-  struct process_exec_status *my_status = cur->exec_status;
-  ASSERT (my_status != NULL);
+  struct process_info *cur_info = cur->proc_info;
+  ASSERT (cur_info != NULL);
 
-  DEBUG_PRINT("[process_exit] tid=%d exiting\n", cur->tid);
+  DEBUG_PRINT("[process_exit] pid=%d exiting\n", cur_info->pid);
 
   /* Lock REQUIRED: both parent and child 
      access orphan/has_exited to decide who frees. */
-  lock_acquire(&my_status->lock);
-  my_status->has_exited = true;
-  bool orphan = my_status->orphan;
-  lock_release(&my_status->lock);
+  lock_acquire(&cur_info->lock);
+  cur_info->has_exited = true;
+  bool orphan = cur_info->orphan;
+  lock_release(&cur_info->lock);
   
   DEBUG_PRINT("[process_exit] %s\n", orphan
-              ? "Parent gone, will free process_exec_status"
+              ? "Parent gone, will free process_info"
               : "Signaling parent (sema_up on wait_sema)");
   
-  if (orphan) free(my_status); /* Parent is gone. We own this structure now. */
-  else sema_up(&my_status->wait_sema); /* Parent is waiting. Signal it. */
+  if (orphan) free(cur_info); /* Parent is gone. We own this structure now. */
+  else 
+  {
+    cur_info->exit_status = status;
+    sema_up(&cur_info->wait_sema); /* Parent will wait. Signal it. */
+  }
 
 
   while (!list_empty(&cur->children))
   {
     struct list_elem *e = list_pop_front(&cur->children);
-    struct process_exec_status *cs = list_entry(e, struct process_exec_status, elem);
+    struct process_info *ci = list_entry(e, struct process_info, elem);
     
     /* Lock REQUIRED: both parent and child access 
        orphan/has_exited to decide who frees. */
-    lock_acquire(&cs->lock);
-    cs->orphan = true;
-    bool should_free_child = cs->has_exited;
-    lock_release(&cs->lock);
+    lock_acquire(&ci->lock);
+    ci->orphan = true;
+    bool should_free_child = ci->has_exited;
+    lock_release(&ci->lock);
     
-    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", cs->pid, should_free_child
-                ? "already exited, will free its process_exec_status"
+    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", ci->pid, should_free_child
+                ? "already exited, will free its process_info"
                 : "still running, marking as orphaned");
     
-    if (should_free_child) free(cs);
+    if (should_free_child) free(ci);
+  }
+
+  /* Close all open file descriptors. */
+  fd_table_close_all();
+
+  /* Close and allow writes to the executable file. */
+  if (cur->exec_file != NULL)
+  {
+    file_allow_write(cur->exec_file);
+    file_close(cur->exec_file);
+    cur->exec_file = NULL;
   }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
-  pd = cur->pagedir;
+  uint32_t *pd = cur->pagedir;
   if (pd != NULL) 
-    {
-      /* Correct ordering here is crucial.  We must set
-         cur->pagedir to NULL before switching page directories,
-         so that a timer interrupt can't switch back to the
-         process page directory.  We must activate the base page
-         directory before destroying the process's page
-         directory, or our active page directory will be one
-         that's been freed (and cleared). */
-      cur->pagedir = NULL;
-      pagedir_activate (NULL);
-      pagedir_destroy (pd);
-    }
+  {
+    /* Correct ordering here is crucial.  We must set
+        cur->pagedir to NULL before switching page directories,
+        so that a timer interrupt can't switch back to the
+        process page directory.  We must activate the base page
+        directory before destroying the process's page
+        directory, or our active page directory will be one
+        that's been freed (and cleared). */
+    cur->pagedir = NULL;
+    pagedir_activate (NULL);
+    pagedir_destroy (pd);
+  }
+
+  printf("%s: exit(%d)\n",cur->name, cur_info->exit_status);
 }
 
 /* Sets up the CPU for running user code in the current
@@ -381,9 +382,9 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           bool writable);
 
 /* Loads an ELF executable invoked with EXEC_STRING into the current
-   thread. Stores the executable's entry point into *EIP
-   and its initial stack pointer into *ESP.
-   Returns true if successful, false otherwise. */
+  thread. Stores the executable's entry point into *EIP
+  and its initial stack pointer into *ESP.
+  Returns true if successful, false otherwise. */
 bool
 load (const char *exec_string, void (**eip) (void), void **esp) 
 {
@@ -391,7 +392,7 @@ load (const char *exec_string, void (**eip) (void), void **esp)
   struct Elf32_Ehdr ehdr;
   struct file *file = NULL;
   off_t file_ofs;
-  bool success = false;
+  bool ret = false;
   int i;
   char filename[NAME_MAX + 1];
   int fn_len;
@@ -402,103 +403,105 @@ load (const char *exec_string, void (**eip) (void), void **esp)
 
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
-  if (t->pagedir == NULL) 
-    goto done;
+  if (t->pagedir == NULL) goto cleanup;
   process_activate ();
 
   /* Open executable file. */
   file = filesys_open (filename);
   if (file == NULL) 
-    {
-      printf ("load: %s: open failed\n", filename);
-      goto done; 
-    }
+  {
+    printf ("load: %s: open failed\n", filename);
+    goto cleanup; 
+  }
 
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
-      || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
-      || ehdr.e_type != 2
-      || ehdr.e_machine != 3
-      || ehdr.e_version != 1
-      || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
-      || ehdr.e_phnum > 1024) 
-    {
-      printf ("load: %s: error loading executable\n", filename);
-      goto done; 
-    }
+    || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
+    || ehdr.e_type != 2
+    || ehdr.e_machine != 3
+    || ehdr.e_version != 1
+    || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
+    || ehdr.e_phnum > 1024) 
+  {
+    printf ("load: %s: error loading executable\n", filename);
+    goto cleanup; 
+  }
 
   /* Read program headers. */
   file_ofs = ehdr.e_phoff;
   for (i = 0; i < ehdr.e_phnum; i++) 
+  {
+    struct Elf32_Phdr phdr;
+
+    if (file_ofs < 0 || file_ofs > file_length (file)) goto cleanup;
+    file_seek (file, file_ofs);
+
+    if (file_read (file, &phdr, sizeof phdr) != sizeof phdr) goto cleanup;
+    file_ofs += sizeof phdr;
+
+    switch (phdr.p_type) 
     {
-      struct Elf32_Phdr phdr;
-
-      if (file_ofs < 0 || file_ofs > file_length (file))
-        goto done;
-      file_seek (file, file_ofs);
-
-      if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
-        goto done;
-      file_ofs += sizeof phdr;
-      switch (phdr.p_type) 
+      case PT_NULL:
+      case PT_NOTE:
+      case PT_PHDR:
+      case PT_STACK:
+      default:
+       /* Ignore this segment. */
+        break;
+      case PT_DYNAMIC:
+      case PT_INTERP:
+      case PT_SHLIB:
+        goto cleanup;
+      case PT_LOAD:
+        if (validate_segment (&phdr, file)) 
         {
-        case PT_NULL:
-        case PT_NOTE:
-        case PT_PHDR:
-        case PT_STACK:
-        default:
-          /* Ignore this segment. */
-          break;
-        case PT_DYNAMIC:
-        case PT_INTERP:
-        case PT_SHLIB:
-          goto done;
-        case PT_LOAD:
-          if (validate_segment (&phdr, file)) 
-            {
-              bool writable = (phdr.p_flags & PF_W) != 0;
-              uint32_t file_page = phdr.p_offset & ~PGMASK;
-              uint32_t mem_page = phdr.p_vaddr & ~PGMASK;
-              uint32_t page_offset = phdr.p_vaddr & PGMASK;
-              uint32_t read_bytes, zero_bytes;
-              if (phdr.p_filesz > 0)
-                {
-                  /* Normal segment.
-                     Read initial part from disk and zero the rest. */
-                  read_bytes = page_offset + phdr.p_filesz;
-                  zero_bytes = (ROUND_UP (page_offset + phdr.p_memsz, PGSIZE)
-                                - read_bytes);
-                }
-              else 
-                {
-                  /* Entirely zero.
-                     Don't read anything from disk. */
-                  read_bytes = 0;
-                  zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
-                }
-              if (!load_segment (file, file_page, (void *) mem_page,
-                                 read_bytes, zero_bytes, writable))
-                goto done;
-            }
-          else
-            goto done;
-          break;
+          bool writable = (phdr.p_flags & PF_W) != 0;
+          uint32_t file_page = phdr.p_offset & ~PGMASK;
+          uint32_t mem_page = phdr.p_vaddr & ~PGMASK;
+          uint32_t page_offset = phdr.p_vaddr & PGMASK;
+          uint32_t read_bytes, zero_bytes;
+          if (phdr.p_filesz > 0)
+          {
+            /* Normal segment.
+              Read initial part from disk and zero the rest. */
+            read_bytes = page_offset + phdr.p_filesz;
+            zero_bytes = (ROUND_UP (page_offset + phdr.p_memsz, PGSIZE)
+                      - read_bytes);
+          }
+          else 
+          {
+            /* Entirely zero.
+              Don't read anything from disk. */
+            read_bytes = 0;
+            zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
+          }
+          if (!load_segment (file, file_page, (void *) mem_page,
+                             read_bytes, zero_bytes, writable))
+          {
+            goto cleanup;
+          }
         }
-    }
+        else goto cleanup;
+        break;
+      }
+   }
 
   /* Set up stack. */
-  if (!setup_stack (exec_string, esp))
-    goto done;
+  if (!setup_stack (exec_string, esp)) goto cleanup;
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
-  success = true;
+  /* Deny writes to executable file while it's running. */
+  file_deny_write (file);
+  t->exec_file = file;
 
- done:
+  ret = true;
+
+cleanup:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
-  return success;
+  if (!ret && file != NULL) file_close (file);
+  return ret;
 }
 
 
@@ -754,4 +757,21 @@ install_page (void *upage, void *kpage, bool writable)
      address, then map our page there. */
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
+}
+
+/* Initialize a process_info structure. */
+static struct process_info*
+process_exec_status_init()
+{
+  struct process_info *proc_info =  malloc(sizeof(struct process_info));
+  if (proc_info == NULL)
+    return NULL;
+  proc_info->pid = PID_ERROR;
+  proc_info->exit_status = -1;
+  proc_info->has_exited = false;
+  proc_info->waited_on = false;
+  proc_info->orphan = false;
+  sema_init(&proc_info->wait_sema, 0);
+  lock_init(&proc_info->lock); 
+  return proc_info;
 }
