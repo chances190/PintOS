@@ -21,4 +21,6 @@ int process_wait(pid_t child_pid);
 void process_exit(int status);
 void process_activate(void);
 
+bool install_page(void *upage, void *kpage, bool writable);
+
 #endif /* userprog/process.h */

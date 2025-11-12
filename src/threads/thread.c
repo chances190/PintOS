@@ -19,6 +19,7 @@
    special cleanup in process_exit(). This is a layering compromise in PintOS's
    design for educational simplicity. */
 #  include "userprog/process.h"
+#  include "vm/page.h"
 #endif
 
 /* Random value for struct thread's `magic' member.
@@ -529,6 +530,7 @@ static void init_thread(struct thread *t, const char *name, int priority)
   {
     t->fd_table[i] = NULL;
   }
+  spt_init(&t->sup_page_table);
 #endif
 
   old_level = intr_disable();

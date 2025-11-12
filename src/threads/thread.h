@@ -116,7 +116,7 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;      /* Page directory. */
-    struct file *exec_file; /* The executable file (with write denied). */
+    struct file *exec_file; /* Running executable handle (with write denied). */
 
     /* File descriptor table. */
     struct file *fd_table[FD_TABLE_SIZE]; /* Open files (fd 2-127; 0=stdin, 1=stdout). */
@@ -125,6 +125,9 @@ struct thread
     struct list children;           /* List of process_info structures. */
     struct process_info *proc_info; /* Pointer to this thread's proc_info.
                                        Ownership is shared with parent. */
+
+    /* Virtual memory. */
+    struct list sup_page_table;
 #endif
     /* Owned by thread.c */
     struct list_elem allelem; /* List element for all threads list. */

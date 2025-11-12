@@ -25,7 +25,7 @@
 
 static thread_func start_process NO_RETURN;
 static bool load(const char *exec_string, void (**eip)(void), void **esp);
-static struct process_info *process_exec_status_init(void);
+static struct process_info *process_info_init(void);
 
 struct start_process_args
 {
@@ -70,7 +70,7 @@ pid_t process_execute(const char *exec_string)
 
   /* Create an EXEC_STATUS struct for the child process. */
   DEBUG_PRINT("[process_execute] Creating child status\n");
-  child_exec_status = process_exec_status_init();
+  child_exec_status = process_info_init();
   if (child_exec_status == NULL)
   {
     palloc_free_page(filename);
@@ -267,7 +267,8 @@ void process_exit(int status)
     bool should_free_child = ci->has_exited;
     lock_release(&ci->lock);
 
-    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", ci->pid, should_free_child ? "already exited, will free its process_info" : "still running, marking as orphaned");
+    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", ci->pid,
+                should_free_child ? "already exited, will free its process_info" : "still running, marking as orphaned");
 
     if (should_free_child)
     {
@@ -395,7 +396,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
   thread. Stores the executable's entry point into *EIP
   and its initial stack pointer into *ESP.
   Returns true if successful, false otherwise. */
-bool load(const char *exec_string, void (**eip)(void), void **esp)
+static bool load(const char *exec_string, void (**eip)(void), void **esp)
 {
   struct thread *t = thread_current();
   struct Elf32_Ehdr ehdr;
@@ -530,8 +531,6 @@ cleanup:
 }
 
 /* load() helpers. */
-
-static bool install_page(void *upage, void *kpage, bool writable);
 
 /* Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
@@ -801,7 +800,7 @@ fail:
    with palloc_get_page().
    Returns true on success, false if UPAGE is already mapped or
    if memory allocation fails. */
-static bool install_page(void *upage, void *kpage, bool writable)
+bool install_page(void *upage, void *kpage, bool writable)
 {
   struct thread *t = thread_current();
 
@@ -811,7 +810,7 @@ static bool install_page(void *upage, void *kpage, bool writable)
 }
 
 /* Initialize a process_info structure. */
-static struct process_info *process_exec_status_init(void)
+static struct process_info *process_info_init(void)
 {
   struct process_info *proc_info = malloc(sizeof(struct process_info));
   if (proc_info == NULL)

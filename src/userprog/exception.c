@@ -1,14 +1,22 @@
 #include "userprog/exception.h"
 
 #include "threads/interrupt.h"
+#include "threads/malloc.h"
+#include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/gdt.h"
+#include "userprog/pagedir.h"
 #include "userprog/process.h"
+#include "vm/page.h"
 
 #include <debug.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
+
+#define USER_STACK_BASE 0x08048000  /* Minimum valid user virtual address */
+#define STACK_TOLERANCE 32          /* Allow up to 32 bytes below ESP (for PUSHA) */
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -156,6 +164,89 @@ static void page_fault(struct intr_frame *f)
     return;
   }
 
+  /* Handle page fault for user process */
+  if (user && not_present)
+  {
+    struct thread *cur = thread_current();
+    void *upage = pg_round_down(fault_addr);
+    void *esp = f->esp;
+
+    /* Validate the fault address before attempting stack growth.
+
+       Invalid addresses:
+       1. NULL pointer (fault_addr == NULL or upage == NULL)
+       2. Kernel address (fault_addr >= PHYS_BASE)
+       3. Below user stack base (fault_addr < USER_STACK_BASE)
+       4. More than STACK_TOLERANCE bytes below stack pointer
+          (not a valid stack access - could be PUSHA instruction) */
+    bool is_valid_addr = (fault_addr != NULL && fault_addr < PHYS_BASE && fault_addr >= (void *) USER_STACK_BASE && fault_addr >= esp - STACK_TOLERANCE);
+
+    if (!is_valid_addr)
+    {
+      DEBUG_PRINT("[page_fault] Invalid address: fault_addr=%p, esp=%p\n", fault_addr, esp);
+      goto page_fault_error;
+    }
+
+    /* Check if page already exists in supplemental page table */
+    struct sup_page_table_entry *spte = spt_lookup(&cur->sup_page_table, upage);
+
+    if (spte == NULL)
+    {
+      /* Page doesn't exist in SPT - this is stack growth */
+      DEBUG_PRINT("[page_fault] Stack growth: allocating page at %p\n", upage);
+
+      /* Allocate a new zero-filled page for the stack */
+      uint8_t *kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+      if (kpage == NULL)
+      {
+        DEBUG_PRINT("[page_fault] palloc_get_page failed (out of memory)\n");
+        goto page_fault_error;
+      }
+
+      /* Install the page into the process's page table */
+      if (!install_page(upage, kpage, true))
+      {
+        DEBUG_PRINT("[page_fault] install_page failed\n");
+        palloc_free_page(kpage);
+        goto page_fault_error;
+      }
+
+      /* Create supplemental page table entry to track this page */
+      spte = malloc(sizeof(struct sup_page_table_entry));
+      if (spte == NULL)
+      {
+        DEBUG_PRINT("[page_fault] malloc for spte failed\n");
+        pagedir_clear_page(cur->pagedir, upage);
+        palloc_free_page(kpage);
+        goto page_fault_error;
+      }
+
+      /* Initialize the SPT entry for this stack page */
+      memset(spte, 0, sizeof(struct sup_page_table_entry));
+      spte->user_vaddr = upage;
+      spte->writable = true;
+      spte->is_swapped = false;
+      spte->is_mmap = false;
+      spte->file = NULL;
+
+      /* Insert into supplemental page table */
+      if (!spt_insert(&cur->sup_page_table, spte))
+      {
+        DEBUG_PRINT("[page_fault] spt_insert failed (page already exists?)\n");
+        free(spte);
+        pagedir_clear_page(cur->pagedir, upage);
+        palloc_free_page(kpage);
+        goto page_fault_error;
+      }
+
+      DEBUG_PRINT("[page_fault] Stack growth successful\n");
+      return; /* Success - page installed */
+    }
+
+    /* TODO: Handle other cases (lazy loading, swap, mmap) */
+  }
+
+page_fault_error:
   DEBUG_PRINT("[page_fault] Unhandled page fault, killing process\n");
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to

@@ -33,6 +33,3 @@ cscope.files
 cscope.out
 TAGS
 tags
-
-.clangd
-.cache
