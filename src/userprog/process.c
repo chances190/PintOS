@@ -24,8 +24,8 @@
 #include <string.h>
 
 static thread_func start_process NO_RETURN;
-static bool load(const char *exec_string, void (**eip)(void), void **esp);
-static struct process_info *process_info_init(void);
+static bool load(const char *, void (**)(void), void **);
+static struct process_info *init_process_info(void);
 
 struct start_process_args
 {
@@ -70,7 +70,7 @@ pid_t process_execute(const char *exec_string)
 
   /* Create an EXEC_STATUS struct for the child process. */
   DEBUG_PRINT("[process_execute] Creating child status\n");
-  child_exec_status = process_info_init();
+  child_exec_status = init_process_info();
   if (child_exec_status == NULL)
   {
     palloc_free_page(filename);
@@ -612,6 +612,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
   ASSERT(pg_ofs(upage) == 0);
   ASSERT(ofs % PGSIZE == 0);
 
+  struct thread *cur = thread_current();
   file_seek(file, ofs);
   while (read_bytes > 0 || zero_bytes > 0)
   {
@@ -637,7 +638,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     memset(kpage + page_read_bytes, 0, page_zero_bytes);
 
     /* Add the page to the process's address space. */
-    if (!install_page(upage, kpage, writable))
+    if (!pagedir_install_page(cur->pagedir, upage, kpage, writable))
     {
       palloc_free_page(kpage);
       return false;
@@ -669,12 +670,10 @@ static bool setup_stack(const char *exec_string, void **esp)
   {
     goto fail;
   }
-
-  if (!install_page(stack_bottom, kpage, true))
+  if (!pagedir_install_page(thread_current()->pagedir, stack_bottom, kpage, true))
   {
     goto fail;
   }
-
   /*
    * We push the program's arguments and a fake return address onto the new user
    * stack to build a "fake interrupt/return" frame. `intr_exit` will pop the
@@ -791,26 +790,8 @@ fail:
   return false;
 }
 
-/* Adds a mapping from user virtual address UPAGE to kernel
-   virtual address KPAGE to the page table.
-   If WRITABLE is true, the user process may modify the page;
-   otherwise, it is read-only.
-   UPAGE must not already be mapped.
-   KPAGE should probably be a page obtained from the user pool
-   with palloc_get_page().
-   Returns true on success, false if UPAGE is already mapped or
-   if memory allocation fails. */
-bool install_page(void *upage, void *kpage, bool writable)
-{
-  struct thread *t = thread_current();
-
-  /* Verify that there's not already a page at that virtual
-     address, then map our page there. */
-  return pagedir_get_page(t->pagedir, upage) == NULL && pagedir_set_page(t->pagedir, upage, kpage, writable);
-}
-
 /* Initialize a process_info structure. */
-static struct process_info *process_info_init(void)
+static struct process_info *init_process_info(void)
 {
   struct process_info *proc_info = malloc(sizeof(struct process_info));
   if (proc_info == NULL)

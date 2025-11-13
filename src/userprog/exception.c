@@ -204,7 +204,7 @@ static void page_fault(struct intr_frame *f)
       }
 
       /* Install the page into the process's page table */
-      if (!install_page(upage, kpage, true))
+      if (!pagedir_install_page(cur->pagedir, upage, kpage, true))
       {
         DEBUG_PRINT("[page_fault] install_page failed\n");
         palloc_free_page(kpage);
