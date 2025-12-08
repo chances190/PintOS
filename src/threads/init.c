@@ -30,6 +30,7 @@
 #  include "userprog/process.h"
 #  include "userprog/syscall.h"
 #  include "userprog/tss.h"
+#  include "vm/frame.h"
 #else
 #  include "tests/threads/tests.h"
 #endif
@@ -98,6 +99,10 @@ int main(void)
   palloc_init(user_page_limit);
   malloc_init();
   paging_init();
+#ifdef USERPROG
+  /* Initialize frame table for virtual memory */
+  frame_table_init();
+#endif
 
   /* Segmentation. */
 #ifdef USERPROG

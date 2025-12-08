@@ -14,7 +14,7 @@ typedef signed int int32_t;
 #define INT32_MIN (-INT32_MAX - 1)
 
 typedef signed long long int int64_t;
-#define INT64_MAX 9223372036854775807LL
+#define INT64_MAX 9223372036854775807ll
 #define INT64_MIN (-INT64_MAX - 1)
 
 typedef unsigned char uint8_t;
@@ -24,10 +24,10 @@ typedef unsigned short int uint16_t;
 #define UINT16_MAX 65535
 
 typedef unsigned int uint32_t;
-#define UINT32_MAX 4294967295U
+#define UINT32_MAX 4294967295u
 
 typedef unsigned long long int uint64_t;
-#define UINT64_MAX 18446744073709551615ULL
+#define UINT64_MAX 18446744073709551615ull
 
 typedef int32_t intptr_t;
 #define INTPTR_MIN INT32_MIN

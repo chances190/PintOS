@@ -82,7 +82,7 @@ BreakFunctionDefinitionParameters: false
 BreakInheritanceList: AfterComma
 BreakStringLiterals: false
 BreakTemplateDeclarations: Yes
-ColumnLimit: 180
+ColumnLimit: 160
 CompactNamespaces: false
 ConstructorInitializerIndentWidth: 2
 ContinuationIndentWidth: 2

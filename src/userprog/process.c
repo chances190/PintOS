@@ -14,6 +14,7 @@
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
+#include "vm/page.h"
 
 #include <debug.h>
 #include <inttypes.h>
@@ -23,8 +24,8 @@
 #include <string.h>
 
 static thread_func start_process NO_RETURN;
-static bool load(const char *exec_string, void (**eip)(void), void **esp);
-static struct process_info *process_exec_status_init();
+static bool load(const char *, void (**)(void), void **);
+static struct process_info *init_process_info(void);
 
 struct start_process_args
 {
@@ -42,7 +43,6 @@ pid_t process_execute(const char *exec_string)
   size_t fn_len;
   tid_t tid;
   struct thread *cur = thread_current();
-  struct thread *child;
   struct process_info *child_exec_status;
 
   /* Make a copy of FILE_NAME for the child process
@@ -70,7 +70,7 @@ pid_t process_execute(const char *exec_string)
 
   /* Create an EXEC_STATUS struct for the child process. */
   DEBUG_PRINT("[process_execute] Creating child status\n");
-  child_exec_status = process_exec_status_init();
+  child_exec_status = init_process_info();
   if (child_exec_status == NULL)
   {
     palloc_free_page(filename);
@@ -267,7 +267,8 @@ void process_exit(int status)
     bool should_free_child = ci->has_exited;
     lock_release(&ci->lock);
 
-    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", ci->pid, should_free_child ? "already exited, will free its process_info" : "still running, marking as orphaned");
+    DEBUG_PRINT("[process_exit] Child tid=%d %s\n", ci->pid,
+                should_free_child ? "already exited, will free its process_info" : "still running, marking as orphaned");
 
     if (should_free_child)
     {
@@ -285,6 +286,9 @@ void process_exit(int status)
     file_close(cur->exec_file);
     cur->exec_file = NULL;
   }
+
+  /* Clean up supplemental page table. */
+  spt_destroy(&cur->sup_page_table);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -392,7 +396,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
   thread. Stores the executable's entry point into *EIP
   and its initial stack pointer into *ESP.
   Returns true if successful, false otherwise. */
-bool load(const char *exec_string, void (**eip)(void), void **esp)
+static bool load(const char *exec_string, void (**eip)(void), void **esp)
 {
   struct thread *t = thread_current();
   struct Elf32_Ehdr ehdr;
@@ -528,8 +532,6 @@ cleanup:
 
 /* load() helpers. */
 
-static bool install_page(void *upage, void *kpage, bool writable);
-
 /* Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
 static bool validate_segment(const struct Elf32_Phdr *phdr, struct file *file)
@@ -610,6 +612,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
   ASSERT(pg_ofs(upage) == 0);
   ASSERT(ofs % PGSIZE == 0);
 
+  struct thread *cur = thread_current();
   file_seek(file, ofs);
   while (read_bytes > 0 || zero_bytes > 0)
   {
@@ -635,7 +638,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     memset(kpage + page_read_bytes, 0, page_zero_bytes);
 
     /* Add the page to the process's address space. */
-    if (!install_page(upage, kpage, writable))
+    if (!pagedir_install_page(cur->pagedir, upage, kpage, writable))
     {
       palloc_free_page(kpage);
       return false;
@@ -667,12 +670,10 @@ static bool setup_stack(const char *exec_string, void **esp)
   {
     goto fail;
   }
-
-  if (!install_page(stack_bottom, kpage, true))
+  if (!pagedir_install_page(thread_current()->pagedir, stack_bottom, kpage, true))
   {
     goto fail;
   }
-
   /*
    * We push the program's arguments and a fake return address onto the new user
    * stack to build a "fake interrupt/return" frame. `intr_exit` will pop the
@@ -789,26 +790,8 @@ fail:
   return false;
 }
 
-/* Adds a mapping from user virtual address UPAGE to kernel
-   virtual address KPAGE to the page table.
-   If WRITABLE is true, the user process may modify the page;
-   otherwise, it is read-only.
-   UPAGE must not already be mapped.
-   KPAGE should probably be a page obtained from the user pool
-   with palloc_get_page().
-   Returns true on success, false if UPAGE is already mapped or
-   if memory allocation fails. */
-static bool install_page(void *upage, void *kpage, bool writable)
-{
-  struct thread *t = thread_current();
-
-  /* Verify that there's not already a page at that virtual
-     address, then map our page there. */
-  return pagedir_get_page(t->pagedir, upage) == NULL && pagedir_set_page(t->pagedir, upage, kpage, writable);
-}
-
 /* Initialize a process_info structure. */
-static struct process_info *process_exec_status_init()
+static struct process_info *init_process_info(void)
 {
   struct process_info *proc_info = malloc(sizeof(struct process_info));
   if (proc_info == NULL)
