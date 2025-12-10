@@ -169,29 +169,12 @@ static void page_fault(struct intr_frame *f)
     DEBUG_PRINT("[page_fault] Invalid user address: fault_addr=%p\n", fault_addr);
     goto exception;
   }
-  
-  /* If kernel tried to access user memory, attempt to recover via the
-     user-mode error handler saved in %eax.  This replicates the Part 2
-     behavior for safe pointer dereferences in the kernel. */
-  if (!user && is_user_vaddr(fault_addr))
-  {
-    DEBUG_PRINT("[page_fault] User process tried to access invalid address: fault_addr=%p\n",
-                fault_addr);
-    DEBUG_PRINT("[page_fault] Setting eip=%p (from eax), eax=0xffffffff\n", (void *) f->eax);
-    DEBUG_PRINT("[page_fault] kernel regs: eip=%p esp=%p eax=%p ebx=%p ecx=%p edx=%p\n",
-                (void *) f->eip, (void *) f->esp, (void *) f->eax, (void *) f->ebx, (void *) f->ecx, (void *) f->edx);
-    /* Set eip to eax (which contains the error handler address)
-       and eax to 0xffffffff to signal error, then return. */
-    f->eip = (void (*)(void)) f->eax;
-    f->eax = 0xFFFFFFFF;
-    return;
-  }
 
-  if (user && is_user_vaddr(fault_addr) && not_present)
+  if (is_user_vaddr(fault_addr) && not_present)
   {
     struct thread *cur = thread_current();
     void *upage = pg_round_down(fault_addr);
-    void *esp = f->esp;
+    void *esp = user ? f->esp : cur->user_esp;
 
     /* Check if page already exists in supplemental page table */
     struct sup_page_table_entry *spte = spt_lookup(&cur->sup_page_table, upage);
@@ -204,15 +187,20 @@ static void page_fault(struct intr_frame *f)
         2. Must be within STACK_TOLERANCE of stack pointer (handles PUSH/PUSHA)
         3. Must not go below USER_STACK_BASE
         Note: fault_addr <= esp (not <) to handle PUSH which faults at ESP before decrement */
-      bool is_valid_stack_growth = (fault_addr <= esp && 
-                                    fault_addr >= esp - STACK_TOLERANCE &&
-                                    fault_addr >= (void *) USER_STACK_BASE);
+      bool is_valid_stack_growth = (esp != NULL
+                                 && fault_addr <= esp
+                                 && fault_addr >= esp - STACK_TOLERANCE
+                                 && fault_addr >= (uint8_t *) PHYS_BASE - MAX_STACK_SIZE
+                                 && fault_addr >= (void *) USER_STACK_BASE);
       
       if (!is_valid_stack_growth)
       {
-        DEBUG_PRINT("[page_fault] Not a valid stack growth: fault_addr=%p, esp=%p\n", 
-                    fault_addr, esp);
-        goto exception;
+        DEBUG_PRINT("[page_fault] Invalid acess to user memory, falling back to eax handler: fault_addr=%p, esp=%p\n",  fault_addr, esp);
+        /* Set eip to eax (which contains the error handler address)
+        and eax to 0xffffffff to signal error, then return. */
+        f->eip = (void (*)(void)) f->eax;
+        f->eax = 0xFFFFFFFF;
+        return;
       }
 
       /* Valid stack growth - allocate page */

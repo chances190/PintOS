@@ -2,29 +2,31 @@
 
 ## Projeto 4 - Sistema de Arquivos
 
-### Parte 1: Arquivos Indexados e Extensíveis (Indexed and Extensible Files)
+### Parte 1: Arquivos Indexados e Extensíveis
 
 #### `src/filesys/inode.c`, `src/filesys/inode.h`
 
-- Modificada `struct inode_disk` para usar array de 12 ponteiros de blocos (10 diretos, 1 indireto, 1 duplo-indireto) em vez de `start` contíguo
-- Adicionado campo `bool is_dir` em `struct inode_disk` para distinguir arquivos de diretórios
-- Definidas constantes `DIRECT_BLOCKS` (10), `INDIRECT_BLOCKS` (1), `DOUBLE_INDIRECT_BLOCKS` (1), `PTRS_PER_BLOCK` (128)
-- Implementada `allocate_block()` para alocar e zerar um único bloco no disco, retornando setor ou -1 em falha
-- Implementada `free_block()` para liberar um bloco individual validando setor não-nulo
-- Implementada `get_data_block()` para navegar estrutura indexada multi-nível e retornar setor do bloco de dados
-  - Suporta alocação lazy via parâmetro `allocate`
-  - Trata blocos diretos, indiretos e duplo-indiretos com leitura/escrita de tabelas de índices
-- Implementada `free_inode_blocks()` para liberar recursivamente todos os blocos de um inode (diretos, indiretos e duplo-indiretos)
-- Modificada `byte_to_sector()` para usar `get_data_block()` navegando estrutura indexada em vez de offset contíguo
-- Modificada `inode_create()` para alocar blocos usando estrutura indexada iterando sobre setores necessários
-- Modificada `inode_write_at()` para estender arquivo dinamicamente alocando novos blocos conforme necessário e atualizando `length`
-- Modificada `inode_close()` para chamar `free_inode_blocks()` ao deletar inode em vez de `free_map_release()` com tamanho fixo
-- Implementada `inode_create_dir()` para criar inode de diretório com flag `is_dir = true`
-- Implementada `inode_is_dir()` para verificar se inode representa um diretório
+- Modificada: `struct inode_disk` — substituído campo `start` (alocação contígua) por array `blocks[12]` com 10 ponteiros diretos, 1 indireto e 1 duplo-indireto para suportar arquivos de até ~8 MB.
+- Adicionado: campo `bool is_dir` em `struct inode_disk` — distingue arquivos de diretórios no disco.
+- Adicionado: constantes `DIRECT_BLOCKS` (10), `INDIRECT_BLOCKS` (1), `DOUBLE_INDIRECT_BLOCKS` (1), `PTRS_PER_BLOCK` (128) — definem estrutura de indexação.
+- Adicionado: `static struct lock inode_lock` — protege lista `open_inodes` contra acesso concorrente.
+- Implementada: `allocate_block()` — aloca e zera um único bloco no disco, retornando setor ou -1 em falha.
+- Implementada: `free_block()` — libera bloco individual validando setor não-nulo.
+- Implementada: `get_data_block()` — navega estrutura indexada multi-nível e retorna setor do bloco de dados; suporta alocação lazy via parâmetro `allocate`.
+- Implementada: `free_inode_blocks()` — libera recursivamente todos os blocos de um inode (diretos, indiretos e duplo-indiretos).
+- Modificada: `byte_to_sector()` — usa `get_data_block()` para navegação indexada em vez de offset contíguo.
+- Modificada: `inode_init()` — inicializa `inode_lock` para sincronização.
+- Modificada: `inode_create()` — aloca blocos usando estrutura indexada, define `is_dir = false`.
+- Modificada: `inode_open()` — adquire/libera `inode_lock` para proteger lista de inodes abertos.
+- Modificada: `inode_close()` — usa `inode_lock` e chama `free_inode_blocks()` ao deletar inode.
+- Modificada: `inode_write_at()` — estende arquivo dinamicamente alocando novos blocos e atualizando `length`.
+- Implementada: `inode_create_dir()` — cria inode de diretório com `is_dir = true` e `length = 0`.
+- Implementada: `inode_is_dir()` — retorna `true` se inode representa diretório.
+- Implementada: `inode_is_removed()` — retorna `true` se inode foi marcado para remoção.
 
 #### `src/filesys/Make.vars`
 
-- Descomentadas linhas para habilitar VM (`kernel.bin: DEFINES += -DVM`, `KERNEL_SUBDIRS += vm`, `GRADING_FILE = Grading.with-vm`)
+- Modificado: habilitado suporte a VM (`kernel.bin: DEFINES += -DVM`, `KERNEL_SUBDIRS += vm`).
 
 #### Design
 
@@ -85,1180 +87,243 @@ Implementação de alocação lazy: blocos só são alocados quando efetivamente
 
 A função `free_inode_blocks()` percorre toda hierarquia de índices:
 1. Libera 10 blocos diretos diretamente
-2. Lê tabela indireto, libera 128 blocos de dados, depois libera a tabela
-3. Lê tabela duplo-indireto, para cada entrada:
+2. Lê tabela indireta, libera 128 blocos de dados, depois libera a tabela
+3. Lê tabela duplo-indireta, para cada entrada:
    - Lê tabela de segundo nível
    - Libera até 128 blocos de dados
    - Libera tabela de segundo nível
-4. Libera tabela duplo-indireto
+4. Libera tabela duplo-indireta
 
-**Sincronização:**
+**Sincronização de Inodes:**
 
-Nesta fase, a sincronização é tratada pelo lock global do filesystem já existente. Extensão de arquivo é protegida pois `inode_write_at()` é atômica em relação a outras operações do filesystem.
+- `inode_lock` protege a lista `open_inodes` contra condições de corrida
+- Lock adquirido em `inode_open()` e `inode_close()` ao manipular a lista
+- Garante que múltiplas threads não corrompam a estrutura de inodes abertos
 
 #### Resultados de Testes
 
-- ✅ `filesys/extended/grow-create`: Criar arquivo e estendê-lo — testa criação e crescimento básico de arquivo.
-- ✅ `filesys/extended/grow-dir-lg`: Crescer diretório grande — valida extensão de diretórios até tamanhos significativos.
-- ✅ `filesys/extended/grow-file-size`: Verificar tamanho após crescimento — confirma que `file_length()` reflete extensão correta.
-- ✅ `filesys/extended/grow-root-lg`: Crescer diretório raiz grande — testa capacidade de expandir root directory.
-- ✅ `filesys/extended/grow-root-sm`: Crescer diretório raiz pequeno — validação de extensão moderada do root.
-- ✅ `filesys/extended/grow-seq-lg`: Escrita sequencial grande — arquivo cresce até ~8MB com padrão sequencial.
-- ✅ `filesys/extended/grow-seq-sm`: Escrita sequencial pequena — crescimento controlado em múltiplos writes.
-- ✅ `filesys/extended/grow-sparse`: Arquivo esparso com gaps — escreve em offsets distantes, verifica preenchimento com zeros.
-- ✅ `filesys/extended/grow-tell`: `tell()` após extensão — position indicator correto após seeks e writes além de EOF.
-- ✅ `filesys/extended/grow-two-files`: Dois arquivos crescendo simultaneamente — valida alocação independente de blocos.
-- ❌ `filesys/extended/syn-rw`: Leitura/escrita concorrente — falha por falta de sincronização granular (será implementada em Feature 4).
-- ❌ `filesys/extended/grow-create-persistence`: Persistência após crescimento — requer implementação de persistence (Feature 2).
-- ❌ `filesys/extended/grow-dir-lg-persistence`: Persistência de diretório grande — aguarda Feature 2.
-- ❌ `filesys/extended/grow-file-size-persistence`: Persistência de tamanho — aguarda Feature 2.
-- ❌ `filesys/extended/grow-root-lg-persistence`: Persistência de root grande — aguarda Feature 2.
-- ❌ `filesys/extended/grow-root-sm-persistence`: Persistência de root pequeno — aguarda Feature 2.
-- ❌ `filesys/extended/grow-seq-lg-persistence`: Persistência de escrita sequencial grande — aguarda Feature 2.
-- ❌ `filesys/extended/grow-seq-sm-persistence`: Persistência de escrita sequencial pequena — aguarda Feature 2.
-- ❌ `filesys/extended/grow-sparse-persistence`: Persistência de arquivo esparso — aguarda Feature 2.
-- ❌ `filesys/extended/grow-tell-persistence`: Persistência de position após tell — aguarda Feature 2.
-- ❌ `filesys/extended/grow-two-files-persistence`: Persistência de dois arquivos — aguarda Feature 2.
-
----
-
-## Plano de Implementação
-
-### Estado Atual do Projeto
-
-- ✅ **Projeto 2 (User Programs)**: 100% completo - todos os 64 testes passando
-- ✅ **Filesystem Base**: 100% completo - testes 67-79 (13 testes) passando
-- ✅ **Feature 1 (Indexed & Extensible Files)**: 100% completo - 10/10 testes grow passando
-- ❌ **Filesystem Extended**: 10/46 testes passando (21.7%)
-
-### Visão Geral das Funcionalidades
-
-O Projeto 4 requer a implementação de 4 funcionalidades principais:
-
-1. ✅ **Indexed and Extensible Files** - Arquivos indexados com crescimento dinâmico (**CONCLUÍDO**)
-2. ⏳ **Subdirectories** - Sistema de diretórios hierárquico (**PRÓXIMO**)
-3. ⏳ **Buffer Cache** - Cache de 64 setores com write-behind e read-ahead
-4. ⏳ **File System Synchronization** - Sincronização para acesso concorrente
-
----
-
-## Feature 2: Subdirectories
-
-### Objetivo
-
-Implementar sistema de diretórios hierárquico completo com suporte a:
-- Diretórios aninhados arbitrariamente
-- Caminhos absolutos (`/a/b/c`)
-- Caminhos relativos (`../a/./b`)
-- Entradas especiais `.` (diretório atual) e `..` (diretório pai)
-
-### Arquivos a Modificar
-
-#### `src/threads/thread.h` e `src/threads/thread.c`
-
-**Adicionar em `struct thread`:**
-```c
-#ifdef FILESYS
-    struct dir *cwd;                  // Diretório de trabalho atual
-#endif
-```
+- ✅ `filesys/extended/grow-create`: Criar arquivo e estendê-lo.
+- ✅ `filesys/extended/grow-dir-lg`: Crescer diretório grande.
+- ✅ `filesys/extended/grow-file-size`: Verificar tamanho após crescimento.
+- ✅ `filesys/extended/grow-root-lg`: Crescer diretório raiz grande.
+- ✅ `filesys/extended/grow-root-sm`: Crescer diretório raiz pequeno.
+- ✅ `filesys/extended/grow-seq-lg`: Escrita sequencial grande (~8MB).
+- ✅ `filesys/extended/grow-seq-sm`: Escrita sequencial pequena.
+- ✅ `filesys/extended/grow-sparse`: Arquivo esparso com gaps.
+- ✅ `filesys/extended/grow-tell`: `tell()` após extensão.
+- ✅ `filesys/extended/grow-two-files`: Dois arquivos crescendo simultaneamente.
+- ✅ `filesys/extended/grow-create-persistence`: Persistência após crescimento.
+- ✅ `filesys/extended/grow-dir-lg-persistence`: Persistência de diretório grande.
+- ✅ `filesys/extended/grow-file-size-persistence`: Persistência de tamanho.
+- ✅ `filesys/extended/grow-root-lg-persistence`: Persistência de root grande.
+- ✅ `filesys/extended/grow-root-sm-persistence`: Persistência de root pequeno.
+- ✅ `filesys/extended/grow-seq-lg-persistence`: Persistência de escrita sequencial grande.
+- ✅ `filesys/extended/grow-seq-sm-persistence`: Persistência de escrita sequencial pequena.
+- ✅ `filesys/extended/grow-sparse-persistence`: Persistência de arquivo esparso.
+- ✅ `filesys/extended/grow-tell-persistence`: Persistência de position após tell.
+- ✅ `filesys/extended/grow-two-files-persistence`: Persistência de dois arquivos.
+
+### Parte 2: Subdiretórios
+
+#### `src/filesys/directory.c`, `src/filesys/directory.h`
+
+- Modificada: `struct dir` — mantém `struct inode *inode` e `off_t pos` para posição de leitura.
+- Modificada: `dir_create()` — cria diretório com entradas "." (auto-referência) e ".." (pai, inicialmente apontando para si mesmo).
+- Modificada: `dir_lookup()` — verifica se inode foi removido antes de retorná-lo via `inode_is_removed()`.
+- Modificada: `dir_remove()` — previne remoção de "." e ".."; verifica se diretório está vazio antes de permitir remoção.
+- Implementada: `get_starting_directory()` — retorna diretório raiz para caminhos absolutos ou cwd para relativos.
+- Implementada: `navigate_to_parent()` — navega para diretório pai via entrada "..".
+- Implementada: `navigate_to_subdirectory()` — navega para subdiretório validando que é um diretório via `inode_is_dir()`.
+- Implementada: `navigate_path_component()` — processa um componente de caminho (".", "..", ou nome).
+- Implementada: `dir_parse_path()` — parseia caminho completo retornando diretório pai e nome do componente final.
+- Implementada: `dir_lookup_path()` — wrapper de `dir_parse_path()` com validação de tamanho de nome.
+- Implementada: `dir_set_parent()` — atualiza entrada ".." de um diretório filho para apontar ao pai correto.
+- Implementada: `dir_set_pos()` — define posição de leitura do diretório.
+- Implementada: `dir_get_pos()` — retorna posição atual de leitura do diretório.
+
+#### `src/filesys/filesys.c`
+
+- Modificada: `filesys_create()` — usa `dir_lookup_path()` para resolver caminhos; não permite criar arquivo com nome vazio.
+- Modificada: `filesys_open()` — usa `dir_lookup_path()` para resolver caminhos; abre diretório se nome final vazio.
+- Modificada: `filesys_remove()` — usa `dir_lookup_path()` para resolver caminhos; não permite remover root ou nome vazio.
+
+#### `src/userprog/syscall.c`
+
+- Implementada: `validate_and_copy_path()` — copia caminho de usuário para kernel com validação.
+- Implementada: `parse_directory_path()` — wrapper para `dir_lookup_path()` usado em syscalls.
+- Implementada: `resolve_directory_from_path()` — resolve caminho completo para um diretório.
+- Implementada: `syscall_chdir()` — muda diretório de trabalho atual do processo.
+- Implementada: `syscall_mkdir()` — cria novo diretório com alocação de inode, criação de "."/"..".
+- Implementada: `syscall_readdir()` — lê próxima entrada de diretório pulando "." e "..".
+- Implementada: `syscall_isdir()` — verifica se fd refere a diretório.
+- Implementada: `syscall_inumber()` — retorna número do inode de um fd.
+- Modificada: `syscall_open()` — suporta abertura de diretórios.
+- Modificada: `syscall_create()` — suporta caminhos com diretórios.
+- Modificada: `syscall_remove()` — suporta remoção de diretórios vazios.
+- Adicionado: `DEBUG_PRINT` em várias funções para depuração condicional.
+
+#### `src/threads/thread.h`, `src/threads/thread.c`
+
+- Adicionado: campo `struct dir *cwd` em `struct thread` — diretório de trabalho atual do processo.
+- Modificada: `init_thread()` — inicializa `cwd` como NULL.
+- Modificada: `thread_create()` — herda `cwd` do processo pai via `dir_reopen()`.
+
+#### `src/userprog/process.c`
+
+- Modificada: `process_exit()` — fecha `cwd` se não for NULL via `dir_close()`.
+- Modificada: `start_process()` — inicializa `cwd` como diretório raiz para o primeiro processo.
+
+#### Design
+
+**Resolução de Caminhos:**
+
+O sistema suporta caminhos absolutos (começando com "/") e relativos (baseados em cwd):
+
+1. `get_starting_directory()` determina ponto de partida:
+   - Caminho absoluto: retorna `dir_open_root()`
+   - Caminho relativo: retorna `dir_reopen(thread_current()->cwd)` ou root se cwd for NULL
+
+2. `dir_parse_path()` processa o caminho:
+   - Tokeniza por "/" usando `strtok_r()`
+   - Para cada componente exceto o último, navega via `navigate_path_component()`
+   - Retorna diretório pai e nome do componente final
+
+3. Componentes especiais:
+   - "." → permanece no diretório atual
+   - ".." → navega para pai via entrada ".."
+
+**Criação de Diretórios (`mkdir`):**
+
+1. Parseia caminho para obter diretório pai e nome
+2. Aloca setor via `free_map_allocate()`
+3. Cria inode de diretório via `inode_create_dir()`
+4. Adiciona entradas "." e ".." via `dir_add()`
+5. Atualiza ".." para apontar ao pai correto via `dir_set_parent()`
+6. Adiciona entrada no diretório pai via `dir_add()`
+
+**Remoção de Diretórios:**
+
+1. Não permite remover "." ou ".."
+2. Verifica se diretório está vazio (apenas "." e ".." como entradas)
+3. Marca inode para remoção
+4. Inode só é liberado quando último opener fecha
 
-**Modificar `thread_create()`:**
-- Herdar `cwd` do processo pai
+**Herança de cwd:**
 
-**Adicionar em `process_exit()`:**
-- Fechar `cwd` ao terminar processo
+- Processo filho herda cwd do pai em `thread_create()` via `dir_reopen()`
+- Garante que pai e filho tenham referências independentes ao mesmo diretório
+- `dir_close()` em `process_exit()` libera a referência
 
-#### `src/filesys/directory.c` e `src/filesys/directory.h`
+**Tratamento de Diretório Removido:**
 
-**Funções a Implementar:**
-
-1. **`dir_create_with_parent(block_sector_t sector, block_sector_t parent_sector)`**
-   - Criar diretório com entradas `.` e `..`
-   - `.` aponta para o próprio diretório
-   - `..` aponta para o diretório pai
-
-2. **`dir_is_empty(struct dir *dir)`**
-   - Verificar se diretório contém apenas `.` e `..`
-   - Necessário para `remove()` de diretórios
-
-3. **`parse_path(const char *path, char *filename, struct dir **dir)`**
-   - Separar caminho em diretório e nome do arquivo
-   - Resolver `.`, `..`, `/` e caminhos relativos
-   - Retornar diretório pai e nome do arquivo
+- `inode_is_removed()` verifica se inode foi marcado para remoção
+- `dir_lookup()` retorna NULL se inode do resultado foi removido
+- `navigate_path_component()` falha se diretório atual foi removido
+- Impede navegação através de diretórios deletados
 
-4. **`dir_lookup_path(const char *path)`**
-   - Navegar caminho completo e retornar inode final
-   - Suportar caminhos absolutos e relativos
-
-**Funções auxiliares:**
-```c
-bool is_absolute_path(const char *path);
-struct dir *get_root_dir(void);
-struct dir *get_current_dir(void);
-bool split_path(const char *path, char **tokens, int *count);
-```
-
-#### `src/userprog/syscall.c` e `src/lib/syscall-nr.h`
+#### Resultados de Testes
 
-**Novos System Calls:**
+- ✅ `filesys/extended/dir-empty-name`: Criar/abrir com nome vazio falha.
+- ✅ `filesys/extended/dir-mk-tree`: Criar árvore de diretórios.
+- ✅ `filesys/extended/dir-mkdir`: Criar diretório simples.
+- ✅ `filesys/extended/dir-open`: Abrir diretório como arquivo.
+- ✅ `filesys/extended/dir-over-file`: Não criar diretório sobre arquivo.
+- ✅ `filesys/extended/dir-rm-cwd`: Remover diretório de trabalho atual.
+- ✅ `filesys/extended/dir-rm-parent`: Remover diretório pai.
+- ✅ `filesys/extended/dir-rm-root`: Não remover diretório raiz.
+- ✅ `filesys/extended/dir-rm-tree`: Remover árvore de diretórios.
+- ✅ `filesys/extended/dir-rmdir`: Remover diretório simples.
+- ✅ `filesys/extended/dir-under-file`: Não criar diretório sob arquivo.
+- ✅ `filesys/extended/dir-vine`: Cadeia profunda de diretórios.
+- ✅ `filesys/extended/dir-empty-name-persistence`: Persistência de nome vazio.
+- ✅ `filesys/extended/dir-mk-tree-persistence`: Persistência de árvore.
+- ✅ `filesys/extended/dir-mkdir-persistence`: Persistência de mkdir.
+- ✅ `filesys/extended/dir-open-persistence`: Persistência de abertura.
+- ✅ `filesys/extended/dir-over-file-persistence`: Persistência de dir sobre arquivo.
+- ✅ `filesys/extended/dir-rm-cwd-persistence`: Persistência de remoção de cwd.
+- ✅ `filesys/extended/dir-rm-parent-persistence`: Persistência de remoção de pai.
+- ✅ `filesys/extended/dir-rm-root-persistence`: Persistência de tentativa de remoção de root.
+- ✅ `filesys/extended/dir-rm-tree-persistence`: Persistência de remoção de árvore.
+- ✅ `filesys/extended/dir-rmdir-persistence`: Persistência de rmdir.
+- ✅ `filesys/extended/dir-under-file-persistence`: Persistência de dir sob arquivo.
+- ✅ `filesys/extended/dir-vine-persistence`: Persistência de cadeia profunda.
 
-1. **`bool chdir(const char *dir)`**
-   - Mudar diretório de trabalho do processo
-   - Validar que `dir` existe e é um diretório
-   - Atualizar `thread_current()->cwd`
+### Parte 3: Sincronização do Sistema de Arquivos
 
-2. **`bool mkdir(const char *dir)`**
-   - Criar novo diretório
-   - Criar entradas `.` e `..`
-   - Falhar se diretório já existe
-   - Falhar se caminho intermediário não existe
+#### `src/filesys/inode.c`
 
-3. **`bool readdir(int fd, char *name)`**
-   - Ler próxima entrada do diretório
-   - Pular `.` e `..`
-   - Retornar false quando não há mais entradas
+- Adicionado: `static struct lock inode_lock` — lock global para proteger lista de inodes abertos.
+- Modificada: `inode_init()` — inicializa `inode_lock`.
+- Modificada: `inode_open()` — adquire lock ao buscar/adicionar inode na lista.
+- Modificada: `inode_close()` — adquire lock ao decrementar contador e remover da lista.
 
-4. **`bool isdir(int fd)`**
-   - Verificar se fd representa diretório
-   - Usar flag `is_dir` do inode
+#### `src/userprog/syscall.c`
 
-5. **`int inumber(int fd)`**
-   - Retornar número do inode (sector number)
-   - Válido para arquivos e diretórios
+- Modificada: handler de `SYS_READDIR` — copia resultado para espaço de kernel primeiro, depois para usuário.
+- Modificada: `syscall_readdir()` — preenche buffer kernel, sincroniza posição via `dir_set_pos()`/`file_seek()`.
 
-**Modificar System Calls Existentes:**
+#### `src/userprog/exception.c`
 
-1. **`open(const char *file)`**
-   - Permitir abrir diretórios (além de arquivos)
-   - Usar `parse_path()` para resolver caminho
+- Modificada: `page_fault()` — implementado tratamento híbrido de page faults durante syscalls.
+- Adicionado: suporte a lazy loading para falhas de kernel em endereços de usuário.
+- Adicionado: validação de crescimento de stack com limite de 8 MB (`MAX_STACK_SIZE`).
+- Adicionado: fallback para trampoline eax quando lazy loading não é aplicável.
 
-2. **`create(const char *file, unsigned initial_size)`**
-   - Usar `parse_path()` para suportar caminhos
-   - Criar arquivo no diretório correto
+#### `src/threads/thread.h`
 
-3. **`remove(const char *file)`**
-   - Permitir remover diretórios vazios
-   - Verificar com `dir_is_empty()`
-   - Proibir remoção do diretório raiz
-   - **Opcional:** permitir remoção de diretório aberto/em uso
+- Adicionado: campo `void *user_esp` — salva ESP do usuário durante syscalls para validação de stack growth.
 
-4. **Todos os syscalls de arquivo:**
-   - Adicionar suporte a parsing de caminho
-   - Validar caminhos absolutos e relativos
+#### Design
 
-#### `src/filesys/filesys.c` e `src/filesys/filesys.h`
+**Sincronização de Inodes:**
 
-**Modificar:**
+A lista `open_inodes` é protegida por um lock dedicado (`inode_lock`):
+- Adquirido em `inode_open()` ao iterar e modificar a lista
+- Adquirido em `inode_close()` ao decrementar `open_cnt` e potencialmente remover
+- Liberado antes de operações de I/O para evitar contenção excessiva
 
-1. **`filesys_create(const char *name, off_t initial_size)`**
-   - Separar caminho e nome do arquivo
-   - Criar arquivo no diretório correto
+**Tratamento de Page Faults durante Syscalls:**
 
-2. **`filesys_open(const char *name)`**
-   - Usar `dir_lookup_path()` para resolver caminho
+Quando o kernel acessa memória de usuário durante uma syscall e ocorre page fault:
 
-3. **`filesys_remove(const char *name)`**
-   - Verificar se é diretório e se está vazio
+1. Se endereço está no espaço de usuário e `not_present`:
+   - Tenta lazy loading via SPT lookup + `vm_load()`
+   - Tenta stack growth se dentro da janela válida (32 bytes abaixo de ESP, máximo 8 MB)
+   - Se bem-sucedido, retorna e retry da instrução
 
-### Estrutura de Diretórios no Disco
+2. Se lazy loading falha:
+   - Usa trampoline eax para sinalizar erro ao syscall handler
+   - Syscall retorna erro graciosamente em vez de crashar
 
-**Diretório Raiz (`/`):**
-- Sempre no setor 1
-- Não possui `..` válido (ou aponta para si mesmo)
+**Limite de Stack (8 MB):**
 
-**Formato de Entrada de Diretório:**
-```c
-struct dir_entry {
-    block_sector_t inode_sector;     // Setor do inode
-    char name[NAME_MAX + 1];         // Nome do arquivo/diretório (máx 14 chars)
-    bool in_use;                     // Entry ativa?
-};
-```
-
-**Entradas Especiais:**
-- `.` - entrada com `inode_sector` apontando para o próprio diretório
-- `..` - entrada com `inode_sector` apontando para o diretório pai
-
-### Exemplo de Parsing de Caminho
-
-**Caminho:** `/home/user/../docs/./file.txt`
-
-**Passos:**
-1. Começar do root (`/`)
-2. Navegar para `home` → encontrar inode de `home`
-3. Navegar para `user` → encontrar inode de `user`
-4. Processar `..` → voltar para `home`
-5. Navegar para `docs` → encontrar inode de `docs`
-6. Processar `.` → permanecer em `docs`
-7. Arquivo final: `file.txt` no diretório `docs`
-
-### Sincronização
-
-- Lock global do filesystem já existe
-- Adicionar locks por diretório se necessário
-- Cuidado com deadlocks em operações que envolvem múltiplos diretórios
-
-### Testes Afetados
-
-- `filesys/extended/dir-*` (24 testes)
-- Testes de persistência de diretórios
-
----
-
-## Feature 3: Buffer Cache
-
-### Objetivo
-
-Implementar cache de blocos entre memória e disco para melhorar performance:
-- Cache limitado a 64 setores
-- Política de eviction LRU (Least Recently Used)
-- Write-behind: escrever dirty blocks periodicamente
-- Read-ahead: pré-carregar próximo bloco assincronamente
-
-### Arquivos a Criar
-
-#### `src/filesys/cache.c` e `src/filesys/cache.h`
-
-**Estruturas de Dados:**
-
-```c
-#define CACHE_SIZE 64
-
-struct cache_entry {
-    block_sector_t sector;              // Número do setor (-1 se inválido)
-    uint8_t data[BLOCK_SECTOR_SIZE];    // Dados do bloco (512 bytes)
-    bool dirty;                         // Necessita write-back?
-    bool valid;                         // Entry em uso?
-    bool accessed;                      // Para algoritmo LRU (second chance)
-    struct lock entry_lock;             // Lock por entrada
-    int read_cnt;                       // Número de leitores ativos
-    struct condition no_readers;        // Condição para sincronização
-};
-
-static struct cache_entry cache[CACHE_SIZE];
-static struct lock cache_lock;          // Lock global do cache
-static int clock_hand;                  // Para algoritmo clock (LRU aproximado)
-```
-
-**Funções Principais:**
-
-1. **`void cache_init(void)`**
-   - Inicializar array de cache entries
-   - Inicializar locks
-   - Criar threads de write-behind e read-ahead
-
-2. **`void cache_read(block_sector_t sector, void *buffer)`**
-   - Procurar setor no cache (cache hit)
-   - Se encontrado: copiar dados e marcar `accessed = true`
-   - Se não encontrado (cache miss):
-     - Evocar entrada usando LRU/Clock
-     - Ler setor do disco
-     - Inserir no cache
-     - Copiar dados para buffer
-
-3. **`void cache_write(block_sector_t sector, const void *buffer)`**
-   - Procurar setor no cache
-   - Se encontrado: atualizar dados, marcar `dirty = true` e `accessed = true`
-   - Se não encontrado:
-     - Evocar entrada
-     - Inserir no cache
-     - Marcar `dirty = true`
-   - **Write-back:** não escrever imediatamente no disco
-
-4. **`void cache_flush(void)`**
-   - Escrever todos os blocos dirty no disco
-   - Chamar em `filesys_done()` para persistir ao desligar
-
-5. **`block_sector_t cache_evict(void)`**
-   - Implementar algoritmo Clock (Second-Chance LRU):
-     - Percorrer cache circularmente
-     - Se `accessed = true`: marcar `accessed = false` e continuar
-     - Se `accessed = false`: evocar essa entrada
-   - Se entrada evocada for dirty, escrever no disco primeiro
-   - Retornar índice da entrada evocada
-
-6. **`void cache_readahead(block_sector_t sector)`**
-   - Pré-carregar setor de forma assíncrona
-   - Não bloquear operação atual
-
-### Integração com Block Device
-
-**Opção A - Modificar `src/devices/block.c`:**
-```c
-void block_read(struct block *block, block_sector_t sector, void *buffer) {
-    cache_read(sector, buffer);  // Usar cache em vez de disco direto
-}
-
-void block_write(struct block *block, block_sector_t sector, const void *buffer) {
-    cache_write(sector, buffer);  // Usar cache
-}
-```
-
-**Opção B - Criar wrappers no inode (Recomendada):**
-- Manter `block_read/write` intactos
-- Inode chama `cache_read/write` diretamente
-- Mais controle e menos acoplamento
-
-### Threads Assíncronas
-
-**Write-Behind Thread:**
-```c
-static void write_behind_thread(void *aux UNUSED) {
-    while (true) {
-        timer_sleep(WRITE_BEHIND_INTERVAL);  // Ex: 5 segundos
-        cache_flush();
-    }
-}
-```
-
-**Read-Ahead Thread:**
-```c
-static void readahead_thread(void *aux UNUSED) {
-    while (true) {
-        block_sector_t sector = readahead_queue_pop();  // Fila de pré-leitura
-        if (sector != (block_sector_t)-1) {
-            uint8_t buffer[BLOCK_SECTOR_SIZE];
-            cache_read(sector, buffer);  // Carregar no cache
-        }
-    }
-}
-```
-
-### Sincronização
-
-**Desafios:**
-- Múltiplos processos acessando mesmo bloco
-- Eviction enquanto bloco está sendo lido/escrito
-- Write-behind thread vs. operações de escrita
-
-**Solução:**
-1. **Lock global (`cache_lock`)**: proteger busca e eviction
-2. **Lock por entrada (`entry_lock`)**: proteger leitura/escrita de dados
-3. **Readers-writers pattern**: permitir múltiplos leitores ou um escritor
-
-**Ordem de aquisição de locks (para evitar deadlock):**
-1. `cache_lock` (encontrar/evocar entrada)
-2. `entry_lock` (acessar dados da entrada)
-3. Liberar `cache_lock` antes de I/O de disco
-
-### Performance
-
-**Métricas esperadas:**
-- Hit rate > 80% em workloads sequenciais
-- Redução significativa em chamadas `block_read/write`
-
-### Testes Afetados
-
-- `filesys/extended/syn-rw` - sincronização de leitura/escrita
-- Todos os testes se beneficiam de performance melhorada
-
----
-
-## Feature 4: File System Synchronization
-
-### Objetivo
-
-Garantir corretude em acessos concorrentes ao sistema de arquivos:
-- Múltiplos processos lendo/escrevendo mesmo arquivo
-- Extensão simultânea de arquivo
-- Criação/remoção concorrente de arquivos
-
-### Problemas a Resolver
-
-1. **Race condition em extensão de arquivo:**
-   - Processos A e B tentam estender arquivo simultaneamente
-   - Solução: lock durante alocação de blocos
-
-2. **Race condition em leitura vs escrita:**
-   - Processo A lê enquanto B escreve
-   - Requisito: A não pode ler dados corrompidos
-   - Solução: sincronização no nível do inode
-
-3. **Fairness:**
-   - Leitores não devem bloquear escritores indefinidamente
-   - Escritores não devem bloquear leitores indefinidamente
-
-### Estratégias de Sincronização
-
-**Opção A - Lock Global do Filesystem:**
-- Um único lock para todas as operações
-- **Vantagens:** simples, sem deadlocks
-- **Desvantagens:** serializa tudo, baixo paralelismo
-
-**Opção B - Locks Granulares (Recomendada):**
-- Lock por inode
-- Lock por diretório
-- Lock do free_map
-- **Vantagens:** alto paralelismo
-- **Desvantagens:** mais complexo, risco de deadlock
-
-### Implementação
-
-**Adicionar em `struct inode`:**
-```c
-struct lock inode_lock;        // Protege extensão e remoção
-int readers;                   // Número de leitores ativos
-int writers;                   // Número de escritores ativos (0 ou 1)
-struct condition can_read;     // Condição para leitores
-struct condition can_write;    // Condição para escritores
-```
-
-**Funções de Sincronização:**
+- Definido `MAX_STACK_SIZE` como 8 MB (8 × 1024 × 1024 bytes)
+- Stack growth só permitido se `fault_addr >= PHYS_BASE - MAX_STACK_SIZE`
+- Previne que endereços arbitrários (como 0x20101234) sejam tratados como stack
 
-1. **`inode_lock_read(struct inode *inode)`**
-   - Permitir múltiplos leitores
-   - Bloquear se há escritor
-
-2. **`inode_unlock_read(struct inode *inode)`**
-   - Decrementar leitores
-   - Sinalizar escritores se necessário
-
-3. **`inode_lock_write(struct inode *inode)`**
-   - Permitir apenas um escritor
-   - Bloquear se há leitores ou escritor
-
-4. **`inode_unlock_write(struct inode *inode)`**
-   - Liberar escritor
-   - Sinalizar próximo leitor/escritor
+**Fluxo de `readdir`:**
 
-**Proteger Operações Críticas:**
-
-1. **`inode_write_at()`** - extensão de arquivo:
-```c
-inode_lock_write(inode);
-// Alocar novos blocos
-// Atualizar length
-inode_unlock_write(inode);
-```
-
-2. **`inode_read_at()`**:
-```c
-inode_lock_read(inode);
-// Ler dados
-inode_unlock_read(inode);
-```
-
-3. **`free_map_allocate()`**:
-```c
-lock_acquire(&free_map_lock);
-// Encontrar e marcar setor livre
-lock_release(&free_map_lock);
-```
-
-### Prevenir Deadlocks
-
-**Regras de Ordenação:**
-1. Nunca adquirir lock de inode enquanto segura lock de diretório
-2. Ordem consistente ao adquirir múltiplos locks
-3. Evitar locks aninhados quando possível
+1. Kernel abre handle de diretório via `dir_open(inode_reopen())`
+2. Sincroniza posição do diretório com posição do arquivo
+3. Lê entrada pulando "." e ".." para buffer kernel
+4. Atualiza posição do arquivo via `file_seek()`
+5. Handler copia resultado para espaço de usuário via `memcpy_to_user()`
 
-### Testes Afetados
+#### Resultados de Testes
 
-- `filesys/extended/syn-rw`
-- `filesys/extended/grow-two-files`
-- Testes de persistence que criam múltiplos arquivos
+- ✅ `filesys/extended/syn-rw`: Leitura/escrita concorrente.
+- ✅ `filesys/extended/syn-rw-persistence`: Persistência após operações concorrentes.
+- ✅ `filesys/base/syn-read`: Leitura concorrente básica.
+- ✅ `filesys/base/syn-remove`: Remoção durante leitura.
+- ✅ `filesys/base/syn-write`: Escrita concorrente básica.
 
----
+### Parte 4: Correção de Bugs
 
-## Ordem de Implementação Recomendada
+**`src/userprog/process.c`:**
+- Corrigido: `process_exit()` — garante que `exit_status` é definido antes de verificar se é órfão, e `process_info` é liberado após imprimir status de saída.
 
-### Opção A - Stanford Guide (Buffer Cache First)
+**`src/userprog/exception.c`:**
+- Corrigido: tratamento híbrido de page faults — primeiro tenta lazy loading/stack growth, depois fallback para eax trampoline.
+- Corrigido: validação de stack growth com limite de 8 MB para rejeitar endereços inválidos.
 
-1. **Buffer Cache** → isolado, não quebra código existente
-2. **Indexed & Extensible Files** → modifica estrutura base
-3. **Subdirectories** → adiciona funcionalidade final
 
-**Vantagens:**
-- Cache pode ser testado independentemente
-- Performance melhorada desde o início
-
-**Desvantagens:**
-- Lógica complexa antes da base estrutural
-- Pode precisar refatorar cache após mudar inode
-
-### Opção B - Lógica Incremental (Recomendada)
-
-1. ✅ **Indexed & Extensible Files** → base estrutural necessária (**CONCLUÍDO**)
-2. ⏳ **Subdirectories** → funcionalidade independente do cache (**PRÓXIMO**)
-3. ⏳ **Buffer Cache** → otimização final sem modificar lógica
-4. ⏳ **File System Sync** → correção de race conditions
-
-**Vantagens:**
-- Constrói base sólida primeiro
-- Subdirectories funcionam sem cache
-- Cache é camada de otimização final
-
-**Desvantagens:**
-- Performance só melhora no final
-
-### Decisão: Opção B
-
-**Justificativa:**
-- Indexed files são fundamentais para tudo
-- Subdirectories testáveis independentemente
-- Cache é transparente para resto do código
-
----
-
-## Estratégia de Branches Git
-
-Cada feature terá sua própria branch para desenvolvimento isolado:
-
-1. ✅ `feat/indexed-files` - Feature 1 (**CONCLUÍDA**)
-2. ⏳ `feat/subdirectories` - Feature 2 (**PRÓXIMA**)
-3. ⏳ `feat/buffer-cache` - Feature 3
-4. ⏳ `feat/fs-sync` - Feature 4 (se necessário como branch separada)
-
-**Workflow:**
-1. Criar branch a partir de `main`
-2. Implementar feature completa
-3. Testar com `make check`
-4. Atualizar `report-FS.md` com documentação
-5. Merge para `main` após revisão
-
----
-
-## Cronograma Estimado
-
-| Feature                    | Complexidade | Tempo Estimado | Status      | Testes Passando |
-|----------------------------|--------------|----------------|-------------|-----------------|
-| Indexed & Extensible Files | Alta         | 6-8 horas      | ✅ Completo | 10/10 (100%)    |
-| Subdirectories             | Alta         | 8-10 horas     | ⏳ Próximo  | 0/24 (0%)       |
-| Buffer Cache               | Média        | 4-6 horas      | ⏳ Pendente | 0/1 (0%)        |
-| File System Sync           | Média        | 2-3 horas      | ⏳ Pendente | N/A             |
-| **Total**                  | -            | **20-27h**     | 25% completo| **10/46 (21.7%)**|
-
----
-
-## Próximos Passos
-
-1. ✅ ~~Revisar e aprovar plano de implementação~~
-2. ✅ ~~Escolher primeira feature a implementar (Indexed Files)~~
-3. ✅ ~~Criar branch `feat/indexed-files`~~
-4. ✅ ~~Implementar Feature 1: Indexed & Extensible Files~~
-5. ✅ ~~Testar e documentar Feature 1~~
-6. ⏳ Criar branch `feat/subdirectories` para Feature 2
-7. ⏳ Implementar Feature 2: Subdirectories
-8. ⏳ Repetir para Features 3 e 4
-
----
-
-### Estado Atual do Projeto
-
-- ✅ **Projeto 2 (User Programs)**: 100% completo - todos os 64 testes passando
-- ✅ **Filesystem Base**: 100% completo - testes 67-79 (13 testes) passando
-- ❌ **Filesystem Extended**: 0% completo - testes 80-125 (46 testes) falhando
-
-### Visão Geral das Funcionalidades
-
-O Projeto 4 requer a implementação de 4 funcionalidades principais:
-
-1. **Indexed and Extensible Files** - Arquivos indexados com crescimento dinâmico
-2. **Subdirectories** - Sistema de diretórios hierárquico
-3. **Buffer Cache** - Cache de 64 setores com write-behind e read-ahead
-4. **File System Synchronization** - Sincronização para acesso concorrente
-
----
-
-## Feature 1: Indexed and Extensible Files
-
-### Objetivo
-
-Modificar a estrutura de armazenamento de arquivos para eliminar fragmentação externa e suportar arquivos maiores que 8MB através de indexação multi-nível (direct, indirect, double-indirect blocks).
-
-### Problema Atual
-
-O sistema atual aloca arquivos como uma única extensão contígua (`block_sector_t start`), o que causa:
-- Fragmentação externa
-- Limite no tamanho máximo de arquivo
-- Impossibilidade de crescimento dinâmico
-
-### Solução Proposta
-
-**Estrutura de Indexação Multi-Nível:**
-- 10 blocos diretos (direct blocks)
-- 1 bloco indireto (indirect block) - aponta para 128 blocos diretos
-- 1 bloco duplo-indireto (double-indirect block) - aponta para 128 blocos indiretos
-
-**Capacidade Total:**
-- Diretos: 10 × 512 bytes = 5 KB
-- Indireto: 128 × 512 bytes = 64 KB
-- Duplo-indireto: 128 × 128 × 512 bytes = 8 MB
-- **Total: ~8 MB** (suficiente para os requisitos)
-
-### Arquivos a Modificar
-
-#### `src/filesys/inode.c` e `src/filesys/inode.h`
-
-**Modificações em `struct inode_disk`:**
-```c
-#define DIRECT_BLOCKS 10
-#define INDIRECT_BLOCKS 1
-#define DOUBLE_INDIRECT_BLOCKS 1
-#define TOTAL_BLOCK_PTRS (DIRECT_BLOCKS + INDIRECT_BLOCKS + DOUBLE_INDIRECT_BLOCKS)
-
-struct inode_disk {
-    block_sector_t blocks[TOTAL_BLOCK_PTRS];  // Array de ponteiros para blocos
-    off_t length;                              // Tamanho do arquivo em bytes
-    bool is_dir;                               // Flag: true = diretório, false = arquivo
-    unsigned magic;                            // Número mágico
-    uint32_t unused[111];                      // Padding para 512 bytes
-};
-```
-
-**Funções a Implementar/Modificar:**
-
-1. **`inode_create(block_sector_t sector, off_t length, bool is_dir)`**
-   - Adicionar parâmetro `is_dir`
-   - Alocar blocos conforme necessário usando estrutura indexada
-   - Inicializar array de blocos com zeros
-   - Para diretórios, criar entradas `.` e `..`
-
-2. **`byte_to_sector(const struct inode *inode, off_t pos)`**
-   - Calcular índice do bloco: `block_idx = pos / BLOCK_SECTOR_SIZE`
-   - Se `block_idx < 10`: retornar bloco direto
-   - Se `block_idx < 10 + 128`: navegar bloco indireto
-   - Caso contrário: navegar bloco duplo-indireto
-
-3. **`inode_write_at(struct inode *inode, const void *buffer, off_t size, off_t offset)`**
-   - Implementar extensão de arquivo
-   - Se escrever além do EOF, alocar novos blocos
-   - Preencher gaps com zeros (sparse file support)
-   - Atualizar `inode->data.length`
-
-4. **`inode_read_at(struct inode *inode, void *buffer, off_t size, off_t offset)`**
-   - Leitura além do EOF retorna 0 bytes
-   - Navegar estrutura indexada para localizar dados
-
-5. **`inode_close(struct inode *inode)`**
-   - Se arquivo sendo removido, liberar todos os blocos alocados
-   - Liberar blocos indiretos e duplo-indiretos recursivamente
-   - Atualizar free_map
-
-6. **Funções auxiliares:**
-   - `allocate_inode_blocks(struct inode_disk *disk_inode, off_t length)` - alocar blocos necessários
-   - `free_inode_blocks(struct inode_disk *disk_inode)` - liberar todos os blocos
-   - `get_data_block(const struct inode *inode, block_sector_t block_idx)` - obter setor de um bloco
-
-### Estratégia de Sparse Files
-
-**Opção A - Alocação Imediata:**
-- Alocar e zerar todos os blocos até a posição de escrita
-- Simples, mas desperdiça espaço em disco
-
-**Opção B - Alocação Lazy (Recomendada):**
-- Alocar blocos apenas quando escritos
-- Manter flag ou valor especial (ex: `(block_sector_t)-1`) para blocos não alocados
-- Leitura de bloco não alocado retorna zeros sem acessar disco
-
-### Sincronização
-
-- Adicionar lock em `struct inode` para proteger extensão de arquivo
-- Garantir atomicidade em operações de alocação/liberação de blocos
-
-### Testes Afetados
-
-- `filesys/extended/grow-*` (21 testes)
-- Testes de criação, leitura e escrita de arquivos grandes
-
----
-
-## Feature 2: Subdirectories
-
-### Objetivo
-
-Implementar sistema de diretórios hierárquico completo com suporte a:
-- Diretórios aninhados arbitrariamente
-- Caminhos absolutos (`/a/b/c`)
-- Caminhos relativos (`../a/./b`)
-- Entradas especiais `.` (diretório atual) e `..` (diretório pai)
-
-### Arquivos a Modificar
-
-#### `src/threads/thread.h` e `src/threads/thread.c`
-
-**Adicionar em `struct thread`:**
-```c
-#ifdef FILESYS
-    struct dir *cwd;                  // Diretório de trabalho atual
-#endif
-```
-
-**Modificar `thread_create()`:**
-- Herdar `cwd` do processo pai
-
-**Adicionar em `process_exit()`:**
-- Fechar `cwd` ao terminar processo
-
-#### `src/filesys/directory.c` e `src/filesys/directory.h`
-
-**Funções a Implementar:**
-
-1. **`dir_create_with_parent(block_sector_t sector, block_sector_t parent_sector)`**
-   - Criar diretório com entradas `.` e `..`
-   - `.` aponta para o próprio diretório
-   - `..` aponta para o diretório pai
-
-2. **`dir_is_empty(struct dir *dir)`**
-   - Verificar se diretório contém apenas `.` e `..`
-   - Necessário para `remove()` de diretórios
-
-3. **`parse_path(const char *path, char *filename, struct dir **dir)`**
-   - Separar caminho em diretório e nome do arquivo
-   - Resolver `.`, `..`, `/` e caminhos relativos
-   - Retornar diretório pai e nome do arquivo
-
-4. **`dir_lookup_path(const char *path)`**
-   - Navegar caminho completo e retornar inode final
-   - Suportar caminhos absolutos e relativos
-
-**Funções auxiliares:**
-```c
-bool is_absolute_path(const char *path);
-struct dir *get_root_dir(void);
-struct dir *get_current_dir(void);
-bool split_path(const char *path, char **tokens, int *count);
-```
-
-#### `src/userprog/syscall.c` e `src/lib/syscall-nr.h`
-
-**Novos System Calls:**
-
-1. **`bool chdir(const char *dir)`**
-   - Mudar diretório de trabalho do processo
-   - Validar que `dir` existe e é um diretório
-   - Atualizar `thread_current()->cwd`
-
-2. **`bool mkdir(const char *dir)`**
-   - Criar novo diretório
-   - Criar entradas `.` e `..`
-   - Falhar se diretório já existe
-   - Falhar se caminho intermediário não existe
-
-3. **`bool readdir(int fd, char *name)`**
-   - Ler próxima entrada do diretório
-   - Pular `.` e `..`
-   - Retornar false quando não há mais entradas
-
-4. **`bool isdir(int fd)`**
-   - Verificar se fd representa diretório
-   - Usar flag `is_dir` do inode
-
-5. **`int inumber(int fd)`**
-   - Retornar número do inode (sector number)
-   - Válido para arquivos e diretórios
-
-**Modificar System Calls Existentes:**
-
-1. **`open(const char *file)`**
-   - Permitir abrir diretórios (além de arquivos)
-   - Usar `parse_path()` para resolver caminho
-
-2. **`create(const char *file, unsigned initial_size)`**
-   - Usar `parse_path()` para suportar caminhos
-   - Criar arquivo no diretório correto
-
-3. **`remove(const char *file)`**
-   - Permitir remover diretórios vazios
-   - Verificar com `dir_is_empty()`
-   - Proibir remoção do diretório raiz
-   - **Opcional:** permitir remoção de diretório aberto/em uso
-
-4. **Todos os syscalls de arquivo:**
-   - Adicionar suporte a parsing de caminho
-   - Validar caminhos absolutos e relativos
-
-#### `src/filesys/filesys.c` e `src/filesys/filesys.h`
-
-**Modificar:**
-
-1. **`filesys_create(const char *name, off_t initial_size)`**
-   - Separar caminho e nome do arquivo
-   - Criar arquivo no diretório correto
-
-2. **`filesys_open(const char *name)`**
-   - Usar `dir_lookup_path()` para resolver caminho
-
-3. **`filesys_remove(const char *name)`**
-   - Verificar se é diretório e se está vazio
-
-### Estrutura de Diretórios no Disco
-
-**Diretório Raiz (`/`):**
-- Sempre no setor 1
-- Não possui `..` válido (ou aponta para si mesmo)
-
-**Formato de Entrada de Diretório:**
-```c
-struct dir_entry {
-    block_sector_t inode_sector;     // Setor do inode
-    char name[NAME_MAX + 1];         // Nome do arquivo/diretório (máx 14 chars)
-    bool in_use;                     // Entry ativa?
-};
-```
-
-**Entradas Especiais:**
-- `.` - entrada com `inode_sector` apontando para o próprio diretório
-- `..` - entrada com `inode_sector` apontando para o diretório pai
-
-### Exemplo de Parsing de Caminho
-
-**Caminho:** `/home/user/../docs/./file.txt`
-
-**Passos:**
-1. Começar do root (`/`)
-2. Navegar para `home` → encontrar inode de `home`
-3. Navegar para `user` → encontrar inode de `user`
-4. Processar `..` → voltar para `home`
-5. Navegar para `docs` → encontrar inode de `docs`
-6. Processar `.` → permanecer em `docs`
-7. Arquivo final: `file.txt` no diretório `docs`
-
-### Sincronização
-
-- Lock global do filesystem já existe
-- Adicionar locks por diretório se necessário
-- Cuidado com deadlocks em operações que envolvem múltiplos diretórios
-
-### Testes Afetados
-
-- `filesys/extended/dir-*` (24 testes)
-- Testes de persistência de diretórios
-
----
-
-## Feature 3: Buffer Cache
-
-### Objetivo
-
-Implementar cache de blocos entre memória e disco para melhorar performance:
-- Cache limitado a 64 setores
-- Política de eviction LRU (Least Recently Used)
-- Write-behind: escrever dirty blocks periodicamente
-- Read-ahead: pré-carregar próximo bloco assincronamente
-
-### Arquivos a Criar
-
-#### `src/filesys/cache.c` e `src/filesys/cache.h`
-
-**Estruturas de Dados:**
-
-```c
-#define CACHE_SIZE 64
-
-struct cache_entry {
-    block_sector_t sector;              // Número do setor (-1 se inválido)
-    uint8_t data[BLOCK_SECTOR_SIZE];    // Dados do bloco (512 bytes)
-    bool dirty;                         // Necessita write-back?
-    bool valid;                         // Entry em uso?
-    bool accessed;                      // Para algoritmo LRU (second chance)
-    struct lock entry_lock;             // Lock por entrada
-    int read_cnt;                       // Número de leitores ativos
-    struct condition no_readers;        // Condição para sincronização
-};
-
-static struct cache_entry cache[CACHE_SIZE];
-static struct lock cache_lock;          // Lock global do cache
-static int clock_hand;                  // Para algoritmo clock (LRU aproximado)
-```
-
-**Funções Principais:**
-
-1. **`void cache_init(void)`**
-   - Inicializar array de cache entries
-   - Inicializar locks
-   - Criar threads de write-behind e read-ahead
-
-2. **`void cache_read(block_sector_t sector, void *buffer)`**
-   - Procurar setor no cache (cache hit)
-   - Se encontrado: copiar dados e marcar `accessed = true`
-   - Se não encontrado (cache miss):
-     - Evocar entrada usando LRU/Clock
-     - Ler setor do disco
-     - Inserir no cache
-     - Copiar dados para buffer
-
-3. **`void cache_write(block_sector_t sector, const void *buffer)`**
-   - Procurar setor no cache
-   - Se encontrado: atualizar dados, marcar `dirty = true` e `accessed = true`
-   - Se não encontrado:
-     - Evocar entrada
-     - Inserir no cache
-     - Marcar `dirty = true`
-   - **Write-back:** não escrever imediatamente no disco
-
-4. **`void cache_flush(void)`**
-   - Escrever todos os blocos dirty no disco
-   - Chamar em `filesys_done()` para persistir ao desligar
-
-5. **`block_sector_t cache_evict(void)`**
-   - Implementar algoritmo Clock (Second-Chance LRU):
-     - Percorrer cache circularmente
-     - Se `accessed = true`: marcar `accessed = false` e continuar
-     - Se `accessed = false`: evocar essa entrada
-   - Se entrada evocada for dirty, escrever no disco primeiro
-   - Retornar índice da entrada evocada
-
-6. **`void cache_readahead(block_sector_t sector)`**
-   - Pré-carregar setor de forma assíncrona
-   - Não bloquear operação atual
-
-### Integração com Block Device
-
-**Opção A - Modificar `src/devices/block.c`:**
-```c
-void block_read(struct block *block, block_sector_t sector, void *buffer) {
-    cache_read(sector, buffer);  // Usar cache em vez de disco direto
-}
-
-void block_write(struct block *block, block_sector_t sector, const void *buffer) {
-    cache_write(sector, buffer);  // Usar cache
-}
-```
-
-**Opção B - Criar wrappers no inode (Recomendada):**
-- Manter `block_read/write` intactos
-- Inode chama `cache_read/write` diretamente
-- Mais controle e menos acoplamento
-
-### Threads Assíncronas
-
-**Write-Behind Thread:**
-```c
-static void write_behind_thread(void *aux UNUSED) {
-    while (true) {
-        timer_sleep(WRITE_BEHIND_INTERVAL);  // Ex: 5 segundos
-        cache_flush();
-    }
-}
-```
-
-**Read-Ahead Thread:**
-```c
-static void readahead_thread(void *aux UNUSED) {
-    while (true) {
-        block_sector_t sector = readahead_queue_pop();  // Fila de pré-leitura
-        if (sector != (block_sector_t)-1) {
-            uint8_t buffer[BLOCK_SECTOR_SIZE];
-            cache_read(sector, buffer);  // Carregar no cache
-        }
-    }
-}
-```
-
-### Sincronização
-
-**Desafios:**
-- Múltiplos processos acessando mesmo bloco
-- Eviction enquanto bloco está sendo lido/escrito
-- Write-behind thread vs. operações de escrita
-
-**Solução:**
-1. **Lock global (`cache_lock`)**: proteger busca e eviction
-2. **Lock por entrada (`entry_lock`)**: proteger leitura/escrita de dados
-3. **Readers-writers pattern**: permitir múltiplos leitores ou um escritor
-
-**Ordem de aquisição de locks (para evitar deadlock):**
-1. `cache_lock` (encontrar/evocar entrada)
-2. `entry_lock` (acessar dados da entrada)
-3. Liberar `cache_lock` antes de I/O de disco
-
-### Performance
-
-**Métricas esperadas:**
-- Hit rate > 80% em workloads sequenciais
-- Redução significativa em chamadas `block_read/write`
-
-### Testes Afetados
-
-- `filesys/extended/syn-rw` - sincronização de leitura/escrita
-- Todos os testes se beneficiam de performance melhorada
-
----
-
-## Feature 4: File System Synchronization
-
-### Objetivo
-
-Garantir corretude em acessos concorrentes ao sistema de arquivos:
-- Múltiplos processos lendo/escrevendo mesmo arquivo
-- Extensão simultânea de arquivo
-- Criação/remoção concorrente de arquivos
-
-### Problemas a Resolver
-
-1. **Race condition em extensão de arquivo:**
-   - Processos A e B tentam estender arquivo simultaneamente
-   - Solução: lock durante alocação de blocos
-
-2. **Race condition em leitura vs escrita:**
-   - Processo A lê enquanto B escreve
-   - Requisito: A não pode ler dados corrompidos
-   - Solução: sincronização no nível do inode
-
-3. **Fairness:**
-   - Leitores não devem bloquear escritores indefinidamente
-   - Escritores não devem bloquear leitores indefinidamente
-
-### Estratégias de Sincronização
-
-**Opção A - Lock Global do Filesystem:**
-- Um único lock para todas as operações
-- **Vantagens:** simples, sem deadlocks
-- **Desvantagens:** serializa tudo, baixo paralelismo
-
-**Opção B - Locks Granulares (Recomendada):**
-- Lock por inode
-- Lock por diretório
-- Lock do free_map
-- **Vantagens:** alto paralelismo
-- **Desvantagens:** mais complexo, risco de deadlock
-
-### Implementação
-
-**Adicionar em `struct inode`:**
-```c
-struct lock inode_lock;        // Protege extensão e remoção
-int readers;                   // Número de leitores ativos
-int writers;                   // Número de escritores ativos (0 ou 1)
-struct condition can_read;     // Condição para leitores
-struct condition can_write;    // Condição para escritores
-```
-
-**Funções de Sincronização:**
-
-1. **`inode_lock_read(struct inode *inode)`**
-   - Permitir múltiplos leitores
-   - Bloquear se há escritor
-
-2. **`inode_unlock_read(struct inode *inode)`**
-   - Decrementar leitores
-   - Sinalizar escritores se necessário
-
-3. **`inode_lock_write(struct inode *inode)`**
-   - Permitir apenas um escritor
-   - Bloquear se há leitores ou escritor
-
-4. **`inode_unlock_write(struct inode *inode)`**
-   - Liberar escritor
-   - Sinalizar próximo leitor/escritor
-
-**Proteger Operações Críticas:**
-
-1. **`inode_write_at()`** - extensão de arquivo:
-```c
-inode_lock_write(inode);
-// Alocar novos blocos
-// Atualizar length
-inode_unlock_write(inode);
-```
-
-2. **`inode_read_at()`**:
-```c
-inode_lock_read(inode);
-// Ler dados
-inode_unlock_read(inode);
-```
-
-3. **`free_map_allocate()`**:
-```c
-lock_acquire(&free_map_lock);
-// Encontrar e marcar setor livre
-lock_release(&free_map_lock);
-```
-
-### Prevenir Deadlocks
-
-**Regras de Ordenação:**
-1. Nunca adquirir lock de inode enquanto segura lock de diretório
-2. Ordem consistente ao adquirir múltiplos locks
-3. Evitar locks aninhados quando possível
-
-### Testes Afetados
-
-- `filesys/extended/syn-rw`
-- `filesys/extended/grow-two-files`
-- Testes de persistence que criam múltiplos arquivos
-
----
-
-## Ordem de Implementação Recomendada
-
-### Opção A - Stanford Guide (Buffer Cache First)
-
-1. **Buffer Cache** → isolado, não quebra código existente
-2. **Indexed & Extensible Files** → modifica estrutura base
-3. **Subdirectories** → adiciona funcionalidade final
-
-**Vantagens:**
-- Cache pode ser testado independentemente
-- Performance melhorada desde o início
-
-**Desvantagens:**
-- Lógica complexa antes da base estrutural
-- Pode precisar refatorar cache após mudar inode
-
-### Opção B - Lógica Incremental (Recomendada)
-
-1. **Indexed & Extensible Files** → base estrutural necessária
-2. **Subdirectories** → funcionalidade independente do cache
-3. **Buffer Cache** → otimização final sem modificar lógica
-
-**Vantagens:**
-- Constrói base sólida primeiro
-- Subdirectories funcionam sem cache
-- Cache é camada de otimização final
-
-**Desvantagens:**
-- Performance só melhora no final
-
-### Decisão: Opção B
-
-**Justificativa:**
-- Indexed files são fundamentais para tudo
-- Subdirectories testáveis independentemente
-- Cache é transparente para resto do código
-
----
-
-## Estratégia de Branches Git
-
-Cada feature terá sua própria branch para desenvolvimento isolado:
-
-1. `feat/indexed-files` - Feature 1
-2. `feat/subdirectories` - Feature 2  
-3. `feat/buffer-cache` - Feature 3
-4. `feat/fs-sync` - Feature 4 (se necessário como branch separada)
-
-**Workflow:**
-1. Criar branch a partir de `main`
-2. Implementar feature completa
-3. Testar com `make check`
-4. Atualizar `report-FS.md` com documentação
-5. Merge para `main` após revisão
-
----
-
-## Cronograma Estimado
-
-| Feature                    | Complexidade | Tempo Estimado | Testes |
-|----------------------------|--------------|----------------|--------|
-| Indexed & Extensible Files | Alta         | 6-8 horas      | 21     |
-| Subdirectories             | Alta         | 8-10 horas     | 24     |
-| Buffer Cache               | Média        | 4-6 horas      | 1+     |
-| File System Sync           | Média        | 2-3 horas      | N/A    |
-| **Total**                  | -            | **20-27h**     | **46** |
-
----
-
-## Próximos Passos
-
-1. ✅ Revisar e aprovar plano de implementação
-2. ⏳ Escolher primeira feature a implementar
-3. ⏳ Criar branch apropriada
-4. ⏳ Implementar feature escolhida
-5. ⏳ Testar e documentar
-6. ⏳ Repetir para próximas features
-
----

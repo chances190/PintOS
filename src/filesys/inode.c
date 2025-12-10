@@ -3,6 +3,7 @@
 #include "filesys/filesys.h"
 #include "filesys/free-map.h"
 #include "threads/malloc.h"
+#include "threads/synch.h"
 
 #include <debug.h>
 #include <list.h>
@@ -280,8 +281,15 @@ static block_sector_t byte_to_sector(const struct inode *inode, off_t pos)
    returns the same `struct inode'. */
 static struct list open_inodes;
 
+/* Lock to protect open_inodes list during concurrent access. */
+static struct lock inode_lock;
+
 /* Initializes the inode module. */
-void inode_init(void) { list_init(&open_inodes); }
+void inode_init(void)
+{
+  list_init(&open_inodes);
+  lock_init(&inode_lock);
+}
 
 /* Initializes an inode with LENGTH bytes of data and
    writes the new inode to sector SECTOR on the file system
@@ -347,6 +355,8 @@ struct inode *inode_open(block_sector_t sector)
   struct list_elem *e;
   struct inode *inode;
 
+  lock_acquire(&inode_lock);
+
   /* Check whether this inode is already open. */
   for (e = list_begin(&open_inodes); e != list_end(&open_inodes); e = list_next(e))
   {
@@ -354,6 +364,7 @@ struct inode *inode_open(block_sector_t sector)
     if (inode->sector == sector)
     {
       inode_reopen(inode);
+      lock_release(&inode_lock);
       return inode;
     }
   }
@@ -362,6 +373,7 @@ struct inode *inode_open(block_sector_t sector)
   inode = malloc(sizeof *inode);
   if (inode == NULL)
   {
+    lock_release(&inode_lock);
     return NULL;
   }
 
@@ -372,6 +384,8 @@ struct inode *inode_open(block_sector_t sector)
   inode->deny_write_cnt = 0;
   inode->removed = false;
   block_read(fs_device, inode->sector, &inode->data);
+  
+  lock_release(&inode_lock);
   return inode;
 }
 
@@ -388,6 +402,12 @@ struct inode *inode_reopen(struct inode *inode)
 /* Returns INODE's inode number. */
 block_sector_t inode_get_inumber(const struct inode *inode) { return inode->sector; }
 
+/* Returns true if INODE was removed from the directory tree. */
+bool inode_is_removed(const struct inode *inode)
+{
+    return inode != NULL && inode->removed;
+}
+
 /* Closes INODE and writes it to disk.
    If this was the last reference to INODE, frees its memory.
    If INODE was also a removed inode, frees its blocks. */
@@ -399,11 +419,15 @@ void inode_close(struct inode *inode)
         return;
     }
 
+    lock_acquire(&inode_lock);
+
     /* Release resources if this was the last opener. */
     if (--inode->open_cnt == 0)
     {
-        /* Remove from inode list and release lock. */
+        /* Remove from inode list. */
         list_remove(&inode->elem);
+
+        lock_release(&inode_lock);
 
         /* Deallocate blocks if removed. */
         if (inode->removed)
@@ -413,6 +437,10 @@ void inode_close(struct inode *inode)
         }
 
         free(inode);
+    }
+    else
+    {
+        lock_release(&inode_lock);
     }
 }
 
