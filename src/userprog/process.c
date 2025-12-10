@@ -288,6 +288,15 @@ void process_exit(int status)
     cur->exec_file = NULL;
   }
 
+#ifdef FILESYS
+  /* Close current working directory. */
+  if (cur->cwd != NULL)
+  {
+    dir_close(cur->cwd);
+    cur->cwd = NULL;
+  }
+#endif
+
   /* Unmap any remaining memory mappings by iteratively calling vm_munmap
   on the first list element without popping it first (vm_munmap will
   remove and free the mapping). */

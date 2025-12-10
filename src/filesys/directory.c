@@ -3,6 +3,9 @@
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#ifdef USERPROG
+#include "threads/thread.h"
+#endif
 
 #include <list.h>
 #include <stdio.h>
@@ -25,7 +28,41 @@ struct dir_entry
 
 /* Creates a directory with space for ENTRY_CNT entries in the
    given SECTOR.  Returns true if successful, false on failure. */
-bool dir_create(block_sector_t sector, size_t entry_cnt) { return inode_create(sector, entry_cnt * sizeof(struct dir_entry)); }
+bool dir_create(block_sector_t sector, size_t entry_cnt)
+{
+  /* Create the directory inode. */
+  if (!inode_create_dir(sector))
+  {
+    return false;
+  }
+
+  /* Open the newly created directory. */
+  struct inode *inode = inode_open(sector);
+  if (inode == NULL)
+  {
+    return false;
+  }
+
+  struct dir *dir = dir_open(inode);
+  if (dir == NULL)
+  {
+    inode_close(inode);
+    return false;
+  }
+
+  /* Add "." entry pointing to itself. */
+  bool success = dir_add(dir, ".", sector);
+
+  /* Add ".." entry. For root directory, ".." points to itself.
+     For other directories, the caller should update ".." after creation. */
+  if (success)
+  {
+    success = dir_add(dir, "..", sector);
+  }
+
+  dir_close(dir);
+  return success;
+}
 
 /* Opens and returns the directory for the given INODE, of which
    it takes ownership.  Returns a null pointer on failure. */
@@ -186,6 +223,12 @@ bool dir_remove(struct dir *dir, const char *name)
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
+  /* Prevent removing "." or ".." */
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+  {
+    return false;
+  }
+
   /* Find directory entry. */
   if (!lookup(dir, name, &e, &ofs))
   {
@@ -197,6 +240,38 @@ bool dir_remove(struct dir *dir, const char *name)
   if (inode == NULL)
   {
     goto done;
+  }
+
+  /* If it's a directory, check if it's empty (only "." and ".." entries). */
+  if (inode_is_dir(inode))
+  {
+    struct dir *target_dir = dir_open(inode_reopen(inode));
+    if (target_dir == NULL)
+    {
+      goto done;
+    }
+
+    char entry_name[NAME_MAX + 1];
+    bool has_other_entries = false;
+    
+    /* Iterate through all entries. */
+    while (dir_readdir(target_dir, entry_name))
+    {
+      /* Skip "." and ".." */
+      if (strcmp(entry_name, ".") != 0 && strcmp(entry_name, "..") != 0)
+      {
+        has_other_entries = true;
+        break;
+      }
+    }
+
+    dir_close(target_dir);
+
+    if (has_other_entries)
+    {
+      /* Directory is not empty. */
+      goto done;
+    }
   }
 
   /* Erase directory entry. */
@@ -232,4 +307,236 @@ bool dir_readdir(struct dir *dir, char name[NAME_MAX + 1])
     }
   }
   return false;
+}
+
+/* Parses PATH and returns the final component name, storing the parent
+   directory in *DIR_OUT. Returns NULL on failure. Caller must free the
+   returned string. Handles both absolute and relative paths.
+   Examples:
+   - "/a/b/c" -> dir_out points to "/a/b", returns "c"
+   - "a/b" -> dir_out points to cwd/a, returns "b"
+   - "a" -> dir_out points to cwd, returns "a"
+   - "/" -> dir_out points to root, returns "" (empty string)
+   - "." -> dir_out points to cwd, returns "."
+   - ".." -> dir_out points to cwd, returns ".." */
+char *dir_parse_path(const char *path, struct dir **dir_out)
+{
+  if (path == NULL || strlen(path) == 0)
+  {
+    return NULL;
+  }
+
+  /* Duplicate the path for modification. */
+  char *path_copy = malloc(strlen(path) + 1);
+  if (path_copy == NULL)
+  {
+    return NULL;
+  }
+  strlcpy(path_copy, path, strlen(path) + 1);
+
+  /* Start from root or current directory. */
+  struct dir *dir;
+  if (path[0] == '/')
+  {
+    dir = dir_open_root();
+  }
+  else
+  {
+#ifdef USERPROG
+    struct thread *cur = thread_current();
+    if (cur->cwd == NULL)
+    {
+      dir = dir_open_root();
+    }
+    else
+    {
+      dir = dir_reopen(cur->cwd);
+    }
+#else
+    dir = dir_open_root();
+#endif
+  }
+
+  if (dir == NULL)
+  {
+    free(path_copy);
+    return NULL;
+  }
+
+  /* Tokenize the path and navigate. */
+  char *save_ptr;
+  char *token;
+  char *prev_token = NULL;
+  
+  token = strtok_r(path_copy, "/", &save_ptr);
+  while (token != NULL)
+  {
+    char *next_token = strtok_r(NULL, "/", &save_ptr);
+    
+    if (next_token != NULL)
+    {
+      /* Not the last component, navigate into this directory. */
+      if (strcmp(token, ".") == 0)
+      {
+        /* Stay in current directory. */
+      }
+      else if (strcmp(token, "..") == 0)
+      {
+        /* Go to parent directory. */
+        struct inode *parent_inode;
+        if (dir_lookup(dir, "..", &parent_inode))
+        {
+          struct dir *parent_dir = dir_open(parent_inode);
+          if (parent_dir != NULL)
+          {
+            dir_close(dir);
+            dir = parent_dir;
+          }
+          else
+          {
+            inode_close(parent_inode);
+          }
+        }
+      }
+      else
+      {
+        /* Navigate to the named directory. */
+        struct inode *next_inode;
+        if (dir_lookup(dir, token, &next_inode))
+        {
+          if (inode_is_dir(next_inode))
+          {
+            struct dir *next_dir = dir_open(next_inode);
+            if (next_dir != NULL)
+            {
+              dir_close(dir);
+              dir = next_dir;
+            }
+            else
+            {
+              inode_close(next_inode);
+              dir_close(dir);
+              free(path_copy);
+              return NULL;
+            }
+          }
+          else
+          {
+            /* Path component is not a directory. */
+            inode_close(next_inode);
+            dir_close(dir);
+            free(path_copy);
+            return NULL;
+          }
+        }
+        else
+        {
+          /* Directory component doesn't exist. */
+          dir_close(dir);
+          free(path_copy);
+          return NULL;
+        }
+      }
+    }
+    
+    prev_token = token;
+    token = next_token;
+  }
+
+  /* Return the directory and the final component. */
+  *dir_out = dir;
+  
+  /* Allocate and return the final component name. */
+  char *name = NULL;
+  if (prev_token != NULL)
+  {
+    name = malloc(strlen(prev_token) + 1);
+    if (name != NULL)
+    {
+      strlcpy(name, prev_token, strlen(prev_token) + 1);
+    }
+  }
+  else
+  {
+    /* Path was "/" or empty after tokenization. */
+    name = malloc(1);
+    if (name != NULL)
+    {
+      name[0] = '\0';
+    }
+  }
+
+  free(path_copy);
+  return name;
+}
+
+/* Looks up PATH and returns the inode for the file/directory.
+   Returns true if successful, storing the directory containing the
+   file in *DIR_OUT and the filename in NAME_OUT. Returns false on failure.
+   NAME_OUT must be a buffer of size NAME_MAX + 1. */
+bool dir_lookup_path(const char *path, struct dir **dir_out, char *name_out)
+{
+  char *name = dir_parse_path(path, dir_out);
+  if (name == NULL)
+  {
+    return false;
+  }
+
+  if (strlen(name) > NAME_MAX)
+  {
+    dir_close(*dir_out);
+    free(name);
+    return false;
+  }
+
+  strlcpy(name_out, name, NAME_MAX + 1);
+  free(name);
+  return true;
+}
+
+/* Updates the ".." entry in the directory at CHILD_SECTOR to point to
+   PARENT_SECTOR. Returns true if successful, false on failure. */
+bool dir_set_parent(block_sector_t child_sector, block_sector_t parent_sector)
+{
+  struct inode *child_inode = inode_open(child_sector);
+  if (child_inode == NULL)
+  {
+    return false;
+  }
+
+  struct dir *child_dir = dir_open(child_inode);
+  if (child_dir == NULL)
+  {
+    inode_close(child_inode);
+    return false;
+  }
+
+  /* Find and update the ".." entry. */
+  struct dir_entry e;
+  off_t ofs;
+  bool success = false;
+
+  if (lookup(child_dir, "..", &e, &ofs))
+  {
+    /* Update the inode_sector field. */
+    e.inode_sector = parent_sector;
+    success = inode_write_at(child_dir->inode, &e, sizeof e, ofs) == sizeof e;
+  }
+
+  dir_close(child_dir);
+  return success;
+}
+
+/* Sets the position of DIR. */
+void dir_set_pos(struct dir *dir, off_t pos)
+{
+  ASSERT(dir != NULL);
+  dir->pos = pos;
+}
+
+/* Returns the current position of DIR. */
+off_t dir_get_pos(struct dir *dir)
+{
+  ASSERT(dir != NULL);
+  return dir->pos;
 }
