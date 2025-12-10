@@ -11,6 +11,8 @@
 #include "threads/vaddr.h"
 #include "userprog/fdtable.h"
 #include "userprog/process.h"
+#include "vm/page.h"
+#include "vm/vm.h"
 
 #include <console.h>
 #include <debug.h>
@@ -67,6 +69,10 @@ void syscall_init(void)
  */
 static void syscall_handler(struct intr_frame *f)
 {
+  /* Save user ESP for page fault handler (in case page fault occurs
+     during syscall while accessing user memory) */
+  thread_current()->user_esp = f->esp;
+
   // Validate the user stack pointer and read syscall number
   int syscall_num;
   if (!f->esp || !memcpy_from_user(&syscall_num, f->esp, sizeof(syscall_num)))
@@ -434,6 +440,7 @@ static bool memcpy_to_user(void *user_dst, const void *kernel_src, size_t size)
   {
     if (!_put_byte_to_user(dst++, *src++))
     {
+      DEBUG_PRINT("[memcpy_to_user] failed write to %p (byte %zu)\n", dst - 1, i);
       return false;
     }
   }
@@ -464,7 +471,6 @@ static void syscall_halt(void) { shutdown_power_off(); }
 
 static void syscall_exit(int status)
 {
-  struct thread *cur = thread_current();
   thread_exit(status);
 }
 
@@ -620,6 +626,7 @@ static int syscall_read(int fd, void *buffer, unsigned length)
   {
     return 0;
   }
+  
   /* FD 0 is stdin - read from keyboard */
   if (fd == 0)
   {
@@ -670,6 +677,7 @@ static int syscall_write(int fd, const void *buffer, unsigned length)
   {
     return 0;
   }
+  
   /* Copy from user buffer to kernel buffer with validation */
   void *kernel_buffer = malloc(length);
   if (kernel_buffer == NULL)
@@ -760,11 +768,13 @@ static void syscall_close(int fd)
 
 static mapid_t syscall_mmap(int fd, void *addr)
 {
-  printf("syscall_mmap not yet implemented\n");
-  return (mapid_t) -1;
+  return vm_mmap(thread_current(), fd, addr);
 }
 
-static void syscall_munmap(mapid_t mapping) { printf("syscall_munmap not yet implemented\n"); }
+static void syscall_munmap(mapid_t mapping)
+{
+  vm_munmap(thread_current(), mapping);
+}
 
 static bool syscall_chdir(const char *dir)
 {

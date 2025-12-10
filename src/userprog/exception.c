@@ -1,5 +1,6 @@
 #include "userprog/exception.h"
 
+#include "filesys/file.h"
 #include "threads/interrupt.h"
 #include "threads/malloc.h"
 #include "threads/palloc.h"
@@ -8,8 +9,13 @@
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
 #include "userprog/process.h"
+#include "vm/frame.h"
 #include "vm/page.h"
+#include "vm/swap.h"
+#include "vm/vm.h"
 
+
+// #define DEBUG
 #include <debug.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -110,9 +116,7 @@ static void kill(struct intr_frame *f)
   }
 }
 
-/* Page fault handler.  This is a skeleton that must be filled in
-   to implement virtual memory.  Some solutions to project 2 may
-   also require modifying this code.
+/* Page fault handler.
 
    At entry, the address that faulted is in CR2 (Control Register
    2) and information about the fault, formatted as described in
@@ -123,7 +127,7 @@ static void kill(struct intr_frame *f)
    [IA32-v3a] section 5.15 "Exception and Interrupt Reference". */
 static void page_fault(struct intr_frame *f)
 {
-  bool not_present; /* True: not-present page, false: writing r/o page. */
+  bool not_present; /* True: page not present, false: protection violation */
   bool write;       /* True: access was write, false: access was read. */
   bool user;        /* True: access by user, false: access by kernel. */
   void *fault_addr; /* Fault address. */
@@ -148,15 +152,32 @@ static void page_fault(struct intr_frame *f)
   not_present = (f->error_code & PF_P) == 0;
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
-
   DEBUG_PRINT("[page_fault] fault_addr=%p, not_present=%d, write=%d, user=%d\n", fault_addr, not_present, write, user);
 
-  /* Check if this is a kernel page fault caused by accessing
-     invalid user memory. */
+  
+  /* Protection violation (page present but access not allowed) is fatal. */
+  if (!not_present)
+  {
+    goto exception;
+  }
+  
+  /* Invalid user addresses are fatal. */
+  if (user && (fault_addr == NULL || is_kernel_vaddr(fault_addr)))
+  {
+    DEBUG_PRINT("[page_fault] Invalid user address: fault_addr=%p\n", fault_addr);
+    goto exception;
+  }
+  
+  /* If kernel tried to access user memory, attempt to recover via the
+     user-mode error handler saved in %eax.  This replicates the Part 2
+     behavior for safe pointer dereferences in the kernel. */
   if (!user && is_user_vaddr(fault_addr))
   {
-    DEBUG_PRINT("[page_fault] Kernel accessing invalid user memory, recovering via eax\n");
+    DEBUG_PRINT("[page_fault] User process tried to access invalid address: fault_addr=%p\n",
+                fault_addr);
     DEBUG_PRINT("[page_fault] Setting eip=%p (from eax), eax=0xffffffff\n", (void *) f->eax);
+    DEBUG_PRINT("[page_fault] kernel regs: eip=%p esp=%p eax=%p ebx=%p ecx=%p edx=%p\n",
+                (void *) f->eip, (void *) f->esp, (void *) f->eax, (void *) f->ebx, (void *) f->ecx, (void *) f->edx);
     /* Set eip to eax (which contains the error handler address)
        and eax to 0xffffffff to signal error, then return. */
     f->eip = (void (*)(void)) f->eax;
@@ -164,94 +185,73 @@ static void page_fault(struct intr_frame *f)
     return;
   }
 
-  /* Handle page fault for user process */
-  if (user && not_present)
+  if (user && is_user_vaddr(fault_addr) && not_present)
   {
     struct thread *cur = thread_current();
     void *upage = pg_round_down(fault_addr);
     void *esp = f->esp;
 
-    /* Validate the fault address before attempting stack growth.
-
-       Invalid addresses:
-       1. NULL pointer (fault_addr == NULL or upage == NULL)
-       2. Kernel address (fault_addr >= PHYS_BASE)
-       3. Below user stack base (fault_addr < USER_STACK_BASE)
-       4. More than STACK_TOLERANCE bytes below stack pointer
-          (not a valid stack access - could be PUSHA instruction) */
-    bool is_valid_addr = (fault_addr != NULL && fault_addr < PHYS_BASE && fault_addr >= (void *) USER_STACK_BASE && fault_addr >= esp - STACK_TOLERANCE);
-
-    if (!is_valid_addr)
-    {
-      DEBUG_PRINT("[page_fault] Invalid address: fault_addr=%p, esp=%p\n", fault_addr, esp);
-      goto page_fault_error;
-    }
-
     /* Check if page already exists in supplemental page table */
     struct sup_page_table_entry *spte = spt_lookup(&cur->sup_page_table, upage);
-
     if (spte == NULL)
     {
-      /* Page doesn't exist in SPT - this is stack growth */
+      /* Page doesn't exist in SPT - check if this is valid stack growth */
+      
+      /* Stack growth validation:
+        1. Must be below the current stack pointer (stack grows downward)
+        2. Must be within STACK_TOLERANCE of stack pointer
+        3. Must not go below USER_STACK_BASE */
+      bool is_valid_stack_growth = (fault_addr < esp && 
+                                    fault_addr >= esp - STACK_TOLERANCE &&
+                                    fault_addr >= (void *) USER_STACK_BASE);
+      
+      if (!is_valid_stack_growth)
+      {
+        DEBUG_PRINT("[page_fault] Not a valid stack growth: fault_addr=%p, esp=%p\n", 
+                    fault_addr, esp);
+        goto exception;
+      }
+
+      /* Valid stack growth - allocate page */
       DEBUG_PRINT("[page_fault] Stack growth: allocating page at %p\n", upage);
 
-      /* Allocate a new zero-filled page for the stack */
-      uint8_t *kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+      /* Allocate a new zero-filled page for the stack (creates SPT entry + frame atomically) */
+      uint8_t *kpage = vm_palloc(upage, true);
       if (kpage == NULL)
       {
-        DEBUG_PRINT("[page_fault] palloc_get_page failed (out of memory)\n");
-        goto page_fault_error;
-      }
-
-      /* Install the page into the process's page table */
-      if (!pagedir_install_page(cur->pagedir, upage, kpage, true))
-      {
-        DEBUG_PRINT("[page_fault] install_page failed\n");
-        palloc_free_page(kpage);
-        goto page_fault_error;
-      }
-
-      /* Create supplemental page table entry to track this page */
-      spte = malloc(sizeof(struct sup_page_table_entry));
-      if (spte == NULL)
-      {
-        DEBUG_PRINT("[page_fault] malloc for spte failed\n");
-        pagedir_clear_page(cur->pagedir, upage);
-        palloc_free_page(kpage);
-        goto page_fault_error;
-      }
-
-      /* Initialize the SPT entry for this stack page */
-      memset(spte, 0, sizeof(struct sup_page_table_entry));
-      spte->user_vaddr = upage;
-      spte->writable = true;
-      spte->is_swapped = false;
-      spte->is_mmap = false;
-      spte->file = NULL;
-
-      /* Insert into supplemental page table */
-      if (!spt_insert(&cur->sup_page_table, spte))
-      {
-        DEBUG_PRINT("[page_fault] spt_insert failed (page already exists?)\n");
-        free(spte);
-        pagedir_clear_page(cur->pagedir, upage);
-        palloc_free_page(kpage);
-        goto page_fault_error;
+        DEBUG_PRINT("[page_fault] vm_palloc failed (out of memory)\n");
+        goto exception;
       }
 
       DEBUG_PRINT("[page_fault] Stack growth successful\n");
-      return; /* Success - page installed */
+      return;
     }
+    else /* spte != NULL */
+    {
+      /* Page exists in SPT - load it */
+      DEBUG_PRINT("[page_fault] Page found in SPT: upage=%p, type=%d, file=%p\n", 
+                  upage, spte->type, spte->file);
 
-    /* TODO: Handle other cases (lazy loading, swap, mmap) */
+      /* Load page from disk */
+      uint8_t *kpage = vm_load(upage);
+      if (kpage == NULL)
+      {
+        DEBUG_PRINT("[page_fault] vm_load failed\n");
+        goto exception;
+      }
+
+      DEBUG_PRINT("[page_fault] Page loaded successfully to %p\n", kpage);
+      return;
+    }
   }
 
-page_fault_error:
+
+exception:
   DEBUG_PRINT("[page_fault] Unhandled page fault, killing process\n");
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
-  printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr, not_present ? "not present" : "rights violation", write ? "writing" : "reading",
+  printf("Page fault at %p: %s error %s page in %s context.\n", 
+         fault_addr, 
+         not_present ?  "not present" : "rights violation", 
+         write ? "writing" : "reading",
          user ? "user" : "kernel");
   kill(f);
 }

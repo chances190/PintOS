@@ -4,14 +4,17 @@
 #include "threads/palloc.h"
 #include "threads/pte.h"
 
+// #define DEBUG
+#include <stdio.h>
+#include <debug.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
 
 static uint32_t *active_pd(void);
 static void invalidate_pagedir(uint32_t *);
 static bool set_page(uint32_t *, void *, void *, bool);
-static void *get_page(uint32_t *, const void *);
 
 /* Creates a new page directory that has mappings for kernel
    virtual addresses, but none for user virtual addresses.
@@ -109,11 +112,13 @@ static uint32_t *lookup_page(uint32_t *pd, const void *vaddr, bool create)
    with palloc_get_page().
    Returns true on success, false if UPAGE is already mapped or
    if memory allocation fails. */
-bool pagedir_install_page(uint32_t *pd, void *upage, void *kpage, bool writable)
+bool pagedir_map_page(uint32_t *pd, void *upage, void *kpage, bool writable)
 {
   /* Verify that there's not already a page at that virtual
      address, then map our page there. */
-  return get_page(pd, upage) == NULL && set_page(pd, upage, kpage, writable);
+  bool ok = pagedir_get_page(pd, upage) == NULL && set_page(pd, upage, kpage, writable);
+  DEBUG_PRINT("[pagedir_map_page] pd=%p map upage=%p kpage=%p writable=%d ok=%d\n", pd, upage, kpage, writable, ok);
+  return ok;
 }
 
 /* Marks user virtual page UPAGE "not present" in page
@@ -132,6 +137,7 @@ void pagedir_clear_page(uint32_t *pd, void *upage)
   {
     *pte &= ~PTE_P;
     invalidate_pagedir(pd);
+    DEBUG_PRINT("[pagedir_clear_page] pd=%p cleared upage=%p\n", pd, upage);
   }
 }
 
@@ -250,7 +256,7 @@ static void invalidate_pagedir(uint32_t *pd)
    otherwise it is read-only.
    Returns true if successful, false if memory allocation
    failed. */
-bool set_page(uint32_t *pd, void *upage, void *kpage, bool writable)
+static bool set_page(uint32_t *pd, void *upage, void *kpage, bool writable)
 {
   uint32_t *pte;
 
@@ -274,17 +280,17 @@ bool set_page(uint32_t *pd, void *upage, void *kpage, bool writable)
   }
 }
 
-/* Looks up the physical address that corresponds to user virtual
-   address UADDR in PD.  Returns the kernel virtual address
-   corresponding to that physical address, or a null pointer if
-   UADDR is unmapped. */
-void *get_page(uint32_t *pd, const void *uaddr)
+
+/* Returns the kernel virtual address for user virtual address UADDR
+   in page directory PD, or a null pointer if no page is mapped there. */
+void *pagedir_get_page(uint32_t *pd, const void *uaddr)
 {
   uint32_t *pte;
 
   ASSERT(is_user_vaddr(uaddr));
 
   pte = lookup_page(pd, uaddr, false);
+  DEBUG_PRINT("[pagedir_get_page] pd=%p uaddr=%p pte=%p\n", pd, uaddr, pte);
   if (pte != NULL && (*pte & PTE_P) != 0)
   {
     return pte_get_page(*pte) + pg_ofs(uaddr);

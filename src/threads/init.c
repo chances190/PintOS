@@ -31,6 +31,9 @@
 #  include "userprog/syscall.h"
 #  include "userprog/tss.h"
 #  include "vm/frame.h"
+#  ifdef VM
+#    include "vm/swap.h"
+#  endif
 #else
 #  include "tests/threads/tests.h"
 #endif
@@ -130,6 +133,11 @@ int main(void)
   ide_init();
   locate_block_devices();
   filesys_init(format_filesys);
+#endif
+
+#if defined(USERPROG) && defined(VM)
+  /* Initialize swap space (must be after ide_init) */
+  swap_init();
 #endif
 
   printf("Boot complete.\n");

@@ -15,6 +15,7 @@
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
 #include "vm/page.h"
+#include "vm/vm.h"
 
 #include <debug.h>
 #include <inttypes.h>
@@ -287,6 +288,17 @@ void process_exit(int status)
     cur->exec_file = NULL;
   }
 
+  /* Unmap any remaining memory mappings by iteratively calling vm_munmap
+  on the first list element without popping it first (vm_munmap will
+  remove and free the mapping). */
+  while (!list_empty(&cur->mappings))
+  {
+    struct list_elem *e = list_begin(&cur->mappings);
+    struct mmap_region *m = list_entry(e, struct mmap_region, elem);
+    /* Call vm_munmap to flush and free pages; it will remove the elem */
+    vm_munmap(cur, m->mapid);
+  }
+  
   /* Clean up supplemental page table. */
   spt_destroy(&cur->sup_page_table);
 
@@ -592,20 +604,14 @@ static bool validate_segment(const struct Elf32_Phdr *phdr, struct file *file)
   return true;
 }
 
-/* Loads a segment starting at offset OFS in FILE at address
-   UPAGE.  In total, READ_BYTES + ZERO_BYTES bytes of virtual
-   memory are initialized, as follows:
-
-        - READ_BYTES bytes at UPAGE must be read from FILE
-          starting at offset OFS.
-
-        - ZERO_BYTES bytes at UPAGE + READ_BYTES must be zeroed.
-
-   The pages initialized by this function must be writable by the
-   user process if WRITABLE is true, read-only otherwise.
-
-   Return true if successful, false if a memory allocation error
-   or disk read error occurs. */
+/* Registers a segment for lazy loading by creating SPT entries.
+   
+   Creates supplemental page table entries for each page in the segment
+   [UPAGE, UPAGE + READ_BYTES + ZERO_BYTES). Pages are loaded on-demand
+   via page faults:
+   
+   Returns true on success, false if memory allocation fails or
+   if any page in the range already exists in the SPT. */
 static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t read_bytes, uint32_t zero_bytes, bool writable)
 {
   ASSERT((read_bytes + zero_bytes) % PGSIZE == 0);
@@ -613,7 +619,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
   ASSERT(ofs % PGSIZE == 0);
 
   struct thread *cur = thread_current();
-  file_seek(file, ofs);
+  
   while (read_bytes > 0 || zero_bytes > 0)
   {
     /* Calculate how to fill this page.
@@ -622,32 +628,28 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
     size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-    /* Get a page of memory. */
-    uint8_t *kpage = palloc_get_page(PAL_USER);
-    if (kpage == NULL)
+    /* Ensure page doesn't already exist in SPT */
+    if (spt_lookup(&cur->sup_page_table, upage) != NULL)
+    {
+      return false;  /* Overlapping segments not allowed */
+    }
+
+    /* Create file-backed SPT entry for lazy loading */
+    struct sup_page_table_entry *spte = spt_create_page_file(
+        upage, file, ofs, page_read_bytes, page_zero_bytes, writable);
+    if (spte == NULL)
     {
       return false;
     }
 
-    /* Load this page. */
-    if (file_read(file, kpage, page_read_bytes) != (int) page_read_bytes)
-    {
-      palloc_free_page(kpage);
-      return false;
-    }
-    memset(kpage + page_read_bytes, 0, page_zero_bytes);
+    /* Insert into supplemental page table */
+    list_push_back(&cur->sup_page_table, &spte->elem);
 
-    /* Add the page to the process's address space. */
-    if (!pagedir_install_page(cur->pagedir, upage, kpage, writable))
-    {
-      palloc_free_page(kpage);
-      return false;
-    }
-
-    /* Advance. */
+    /* Advance to next page */
     read_bytes -= page_read_bytes;
     zero_bytes -= page_zero_bytes;
     upage += PGSIZE;
+    ofs += page_read_bytes;
   }
   return true;
 }
@@ -665,12 +667,8 @@ static bool setup_stack(const char *exec_string, void **esp)
   size_t exec_str_len;
   size_t required_space;
 
-  kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+  kpage = vm_palloc(stack_bottom, true);
   if (kpage == NULL)
-  {
-    goto fail;
-  }
-  if (!pagedir_install_page(thread_current()->pagedir, stack_bottom, kpage, true))
   {
     goto fail;
   }
@@ -768,24 +766,12 @@ static bool setup_stack(const char *exec_string, void **esp)
   /* Set the stack pointer */
   *esp = current;
 
-  // /* DEBUG print argc and argv */
-  // {
-  // void **stack_ptr = (void **)*esp;
-  // int debug_argc = *(int *)(stack_ptr + 1);
-  // char **debug_argv = *(char ***)(stack_ptr + 2);
-
-  // printf("DEBUG: argc = %d\n", debug_argc);
-  // for (int i = 0; i < debug_argc; i++) {
-  // printf("DEBUG: argv[%d] = %s\n", i, debug_argv[i]);
-  // }
-  // }
-
   return true;
 
 fail:
   if (kpage != NULL)
   {
-    palloc_free_page(kpage);
+    vm_free(kpage);
   }
   return false;
 }
