@@ -42,7 +42,8 @@ void *vm_load(void *upage)
     return NULL;
   }
   
-  /* Load page content based on type */
+  /* Load page content based on type.
+     Note: Frame remains pinned during I/O to prevent eviction mid-operation. */
   if (spte->type == PAGE_SWAP)
   {
     DEBUG_PRINT("[vm_load] swap_in slot=%zu for upage=%p kpage=%p\n", spte->swap_slot, upage, kpage);
@@ -51,7 +52,8 @@ void *vm_load(void *upage)
   }
   else if (spte->type == PAGE_FILE)
   {
-    /* Load from file (executable segment or mmap) */
+    /* Load from file (executable segment or mmap).
+       Frame is pinned, so no eviction can occur during file_read_at. */
     off_t bytes_read = file_read_at(spte->file, kpage, spte->read_bytes, spte->file_offset);
     DEBUG_PRINT("[vm_load] file_read_at bytes=%d (expected %zu) upage=%p file=%p\n", bytes_read, spte->read_bytes, upage, spte->file);
     DEBUG_PRINT("[vm_load] read bytes: %02x %02x %02x %02x\n", ((uint8_t *)kpage)[0], ((uint8_t *)kpage)[1], ((uint8_t *)kpage)[2], ((uint8_t *)kpage)[3]);
@@ -139,11 +141,12 @@ void vm_free(void *kpage)
     swap_free(spte->swap_slot);
   }
 
-  /* Remove from frame table (if tracked separately) */
+  /* Remove from frame table and free physical page */
   frame_free(kpage);
 
-  /* Remove from SPT */
+  /* Remove from SPT and free the entry */
   list_remove(&spte->elem);
+  free(spte);  /* Fix memory leak: must free the SPT entry itself */
 }
 
 /* Unmap a memory-mapped region for a thread, flush dirty pages to file, and free resources. */

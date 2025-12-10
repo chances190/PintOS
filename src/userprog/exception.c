@@ -21,8 +21,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Stack growth validation constants */
 #define USER_STACK_BASE 0x08048000  /* Minimum valid user virtual address */
 #define STACK_TOLERANCE 32          /* Allow up to 32 bytes below ESP (for PUSHA) */
+#define MAX_STACK_SIZE (8 * 1024 * 1024)  /* 8 MB maximum stack size */
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -198,10 +200,11 @@ static void page_fault(struct intr_frame *f)
       /* Page doesn't exist in SPT - check if this is valid stack growth */
       
       /* Stack growth validation:
-        1. Must be below the current stack pointer (stack grows downward)
-        2. Must be within STACK_TOLERANCE of stack pointer
-        3. Must not go below USER_STACK_BASE */
-      bool is_valid_stack_growth = (fault_addr < esp && 
+        1. Must be at or below current stack pointer (stack grows downward)
+        2. Must be within STACK_TOLERANCE of stack pointer (handles PUSH/PUSHA)
+        3. Must not go below USER_STACK_BASE
+        Note: fault_addr <= esp (not <) to handle PUSH which faults at ESP before decrement */
+      bool is_valid_stack_growth = (fault_addr <= esp && 
                                     fault_addr >= esp - STACK_TOLERANCE &&
                                     fault_addr >= (void *) USER_STACK_BASE);
       

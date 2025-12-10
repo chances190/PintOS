@@ -133,6 +133,11 @@ struct thread
    struct list mappings;           /* List of mmap_region entries */
    int next_mapid;                 /* Next mapping id to allocate */
 #endif
+
+#ifdef FILESYS
+    /* Owned by userprog/process.c. */
+    struct dir *cwd;                /* Current working directory. */
+#endif
     /* Owned by thread.c */
     struct list_elem allelem; /* List element for all threads list. */
 

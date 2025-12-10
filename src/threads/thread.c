@@ -21,6 +21,9 @@
 #  include "userprog/process.h"
 #  include "vm/page.h"
 #endif
+#ifdef FILESYS
+#  include "filesys/directory.h"
+#endif
 
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
@@ -200,6 +203,15 @@ tid_t thread_create(const char *name, int priority, thread_func *function, void 
   /* Initialize thread. */
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
+
+#ifdef FILESYS
+  /* Inherit parent's current working directory. */
+  struct thread *cur = thread_current();
+  if (cur->cwd != NULL)
+  {
+    t->cwd = dir_reopen(cur->cwd);
+  }
+#endif
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame(t, sizeof *kf);
@@ -533,6 +545,10 @@ static void init_thread(struct thread *t, const char *name, int priority)
   spt_init(&t->sup_page_table);
   list_init(&t->mappings);
   t->next_mapid = 1;
+#endif
+
+#ifdef FILESYS
+  t->cwd = NULL;
 #endif
 
   old_level = intr_disable();

@@ -2,6 +2,7 @@
 #define FILESYS_DIRECTORY_H
 
 #include "devices/block.h"
+#include "filesys/off_t.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -27,5 +28,14 @@ bool dir_lookup(const struct dir *, const char *name, struct inode **);
 bool dir_add(struct dir *, const char *name, block_sector_t);
 bool dir_remove(struct dir *, const char *name);
 bool dir_readdir(struct dir *, char name[NAME_MAX + 1]);
+
+/* Path resolution. */
+bool dir_lookup_path(const char *path, struct dir **dir_out, char *name_out);
+char *dir_parse_path(const char *path, struct dir **dir_out);
+bool dir_set_parent(block_sector_t child_sector, block_sector_t parent_sector);
+
+/* Directory position. */
+void dir_set_pos(struct dir *, off_t);
+off_t dir_get_pos(struct dir *);
 
 #endif /* filesys/directory.h */

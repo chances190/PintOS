@@ -1,9 +1,15 @@
+// #define DEBUG
+
 #include "userprog/syscall.h"
 
 #include "devices/input.h"
 #include "devices/shutdown.h"
+#include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/free-map.h"
+#include "filesys/inode.h"
+#include "filesys/off_t.h"
 #include "threads/interrupt.h"
 #include "threads/malloc.h"
 #include "threads/synch.h"
@@ -17,7 +23,10 @@
 #include <console.h>
 #include <debug.h>
 #include <stdio.h>
+#include <string.h>
 #include <syscall-nr.h>
+
+#define READDIR_MAX_LEN 14
 
 static void syscall_handler(struct intr_frame *f);
 
@@ -288,12 +297,18 @@ static void syscall_handler(struct intr_frame *f)
     case SYS_READDIR:
     {
       int fd;
-      char name[READDIR_MAX_LEN + 1];
-      if (!memcpy_from_user(&fd, (int *) f->esp + 1, sizeof(fd)))
+      char *name_ptr;
+      if (!memcpy_from_user(&fd, (int *) f->esp + 1, sizeof(fd)) ||
+          !memcpy_from_user(&name_ptr, (char **) f->esp + 2, sizeof(name_ptr)))
       {
         syscall_exit(-1);
       }
-      bool ok = syscall_readdir(fd, name);
+      char kernel_name[READDIR_MAX_LEN + 1];
+      bool ok = syscall_readdir(fd, kernel_name);
+      if (ok && !memcpy_to_user(name_ptr, kernel_name, strlen(kernel_name) + 1))
+      {
+        syscall_exit(-1);
+      }
       f->eax = ok;
       break;
     }
@@ -466,6 +481,97 @@ static bool strncpy_to_user(void *user_dst, const char *kernel_src, size_t max_l
   // String exceeded max_len
   return false;
 }
+
+/* === Helper Functions for Directory Operations === */
+
+/* Validates and copies a user-provided path string to kernel space.
+   Returns kernel buffer on success (caller must free), NULL on failure.
+   Exits process with -1 if copy fails. */
+static char *validate_and_copy_path(const char *user_path)
+{
+  if (user_path == NULL)
+  {
+    return NULL;
+  }
+
+  char *kernel_path = malloc(PATH_MAX);
+  if (kernel_path == NULL)
+  {
+    return NULL;
+  }
+
+  if (!strncpy_from_user(kernel_path, (void *) user_path, PATH_MAX))
+  {
+    free(kernel_path);
+    syscall_exit(-1);
+  }
+
+  if (kernel_path[0] == '\0')
+  {
+    free(kernel_path);
+    return NULL;
+  }
+
+  return kernel_path;
+}
+
+/* Parses a path and returns both parent directory and final component name.
+   Returns true on success, false on failure. Caller must close the returned directory in parent_out. */
+static bool parse_directory_path(const char *path, struct dir **parent_out, char *name_out)
+{
+  if (!dir_lookup_path(path, parent_out, name_out))
+  {
+    return false;
+  }
+
+  if (strlen(name_out) == 0)
+  {
+    dir_close(*parent_out);
+    return false;
+  }
+
+  return true;
+}
+
+/* Resolves a path to a directory. Returns directory handle or NULL.
+   Handles both paths that end in a directory component and empty names. */
+static struct dir *resolve_directory_from_path(const char *path)
+{
+  struct dir *target_dir;
+  char name[NAME_MAX + 1];
+
+  if (!dir_lookup_path(path, &target_dir, name))
+  {
+    return NULL;
+  }
+
+  /* If name is not empty, look up the directory. */
+  if (strlen(name) > 0)
+  {
+    struct inode *inode;
+    if (!dir_lookup(target_dir, name, &inode))
+    {
+      dir_close(target_dir);
+      return NULL;
+    }
+
+    if (!inode_is_dir(inode))
+    {
+      inode_close(inode);
+      dir_close(target_dir);
+      return NULL;
+    }
+
+    struct dir *result = dir_open(inode);
+    dir_close(target_dir);
+    return result;
+  }
+
+  /* Path ended at a directory (e.g., "/" or ".."). */
+  return target_dir;
+}
+
+/* === End of Helper Functions === */
 
 static void syscall_halt(void) { shutdown_power_off(); }
 
@@ -707,7 +813,15 @@ static int syscall_write(int fd, const void *buffer, unsigned length)
     return -1;
   }
 
+  /* Cannot write to directories */
   lock_acquire(&filesys_lock);
+  if (inode_is_dir(file_get_inode(fp)))
+  {
+    lock_release(&filesys_lock);
+    free(kernel_buffer);
+    return -1;
+  }
+
   int bytes = file_write(fp, kernel_buffer, length);
   lock_release(&filesys_lock);
 
@@ -778,30 +892,189 @@ static void syscall_munmap(mapid_t mapping)
 
 static bool syscall_chdir(const char *dir)
 {
-  printf("syscall_chdir not yet implemented\n");
-  return false;
+  char *kernel_dir = validate_and_copy_path(dir);
+  if (kernel_dir == NULL)
+  {
+    return false;
+  }
+
+  lock_acquire(&filesys_lock);
+
+  struct dir *new_cwd = resolve_directory_from_path(kernel_dir);
+  if (new_cwd == NULL)
+  {
+    lock_release(&filesys_lock);
+    free(kernel_dir);
+    return false;
+  }
+
+  /* Update the current working directory. */
+  struct thread *cur = thread_current();
+  if (cur->cwd != NULL)
+  {
+    dir_close(cur->cwd);
+  }
+  cur->cwd = new_cwd;
+
+  lock_release(&filesys_lock);
+  free(kernel_dir);
+  return true;
 }
 
 static bool syscall_mkdir(const char *dir)
 {
-  printf("syscall_mkdir not yet implemented\n");
-  return false;
+  char *kernel_dir = validate_and_copy_path(dir);
+  if (kernel_dir == NULL)
+  {
+    DEBUG_PRINT("[mkdir] invalid path\n");
+    return false;
+  }
+
+  DEBUG_PRINT("[mkdir] path='%s'\n", kernel_dir);
+
+  lock_acquire(&filesys_lock);
+
+  /* Parse the path to get parent directory and new directory name. */
+  struct dir *parent_dir;
+  char name[NAME_MAX + 1];
+
+  if (!parse_directory_path(kernel_dir, &parent_dir, name))
+  {
+    DEBUG_PRINT("[mkdir] parse failed\n");
+    lock_release(&filesys_lock);
+    free(kernel_dir);
+    return false;
+  }
+
+  DEBUG_PRINT("[mkdir] parsed: name='%s'\n", name);
+
+  /* Allocate a sector for the new directory. */
+  block_sector_t inode_sector = 0;
+  bool success = free_map_allocate(1, &inode_sector);
+  DEBUG_PRINT("[mkdir] free_map_allocate: %s (sector=%u)\n", success ? "OK" : "FAIL", inode_sector);
+
+  if (success)
+  {
+    success = dir_create(inode_sector, 16);
+    DEBUG_PRINT("[mkdir] dir_create: %s\n", success ? "OK" : "FAIL");
+  }
+
+  if (success)
+  {
+    block_sector_t parent_sector = inode_get_inumber(dir_get_inode(parent_dir));
+    success = dir_set_parent(inode_sector, parent_sector);
+    DEBUG_PRINT("[mkdir] dir_set_parent: %s\n", success ? "OK" : "FAIL");
+  }
+
+  if (success)
+  {
+    success = dir_add(parent_dir, name, inode_sector);
+    DEBUG_PRINT("[mkdir] dir_add: %s\n", success ? "OK" : "FAIL");
+  }
+
+  if (!success && inode_sector != 0)
+  {
+    free_map_release(inode_sector, 1);
+  }
+
+  dir_close(parent_dir);
+  lock_release(&filesys_lock);
+  free(kernel_dir);
+  return success;
 }
 
 static bool syscall_readdir(int fd, char name[READDIR_MAX_LEN + 1])
 {
-  printf("syscall_readdir not yet implemented\n");
-  return false;
+  lock_acquire(&filesys_lock);
+
+  struct file *file = fd_table_get(fd);
+  if (file == NULL)
+  {
+    lock_release(&filesys_lock);
+    return false;
+  }
+
+  struct inode *inode = file_get_inode(file);
+  if (!inode_is_dir(inode))
+  {
+    lock_release(&filesys_lock);
+    return false;
+  }
+
+  /* Open a directory handle for the inode. */
+  struct dir *dir = dir_open(inode_reopen(inode));
+  if (dir == NULL)
+  {
+    lock_release(&filesys_lock);
+    return false;
+  }
+
+  /* Set the directory position to match the file position. */
+  dir_set_pos(dir, file_tell(file));
+
+  /* Read the next entry, skipping "." and "..". */
+  char kernel_name[NAME_MAX + 1];
+  bool found = false;
+  while (dir_readdir(dir, kernel_name))
+  {
+    if (strcmp(kernel_name, ".") != 0 && strcmp(kernel_name, "..") != 0)
+    {
+      found = true;
+      break;
+    }
+  }
+
+  /* Update the file position to match the directory position. */
+  file_seek(file, dir_get_pos(dir));
+
+  dir_close(dir);
+
+  if (found)
+  {
+    /* Copy the name to user space. */
+    if (!memcpy_to_user(name, kernel_name, strlen(kernel_name) + 1))
+    {
+      lock_release(&filesys_lock);
+      syscall_exit(-1);
+    }
+  }
+
+  lock_release(&filesys_lock);
+  return found;
 }
 
 static bool syscall_isdir(int fd)
 {
-  printf("syscall_isdir not yet implemented\n");
-  return false;
+  lock_acquire(&filesys_lock);
+
+  struct file *file = fd_table_get(fd);
+  if (file == NULL)
+  {
+    lock_release(&filesys_lock);
+    return false;
+  }
+
+  struct inode *inode = file_get_inode(file);
+  bool is_dir = inode_is_dir(inode);
+
+  lock_release(&filesys_lock);
+  return is_dir;
 }
 
 static int syscall_inumber(int fd)
 {
-  printf("syscall_inumber not yet implemented\n");
-  return -1;
+  lock_acquire(&filesys_lock);
+
+  struct file *file = fd_table_get(fd);
+  if (file == NULL)
+  {
+    lock_release(&filesys_lock);
+    return -1;
+  }
+
+  struct inode *inode = file_get_inode(file);
+  int inumber = (int) inode_get_inumber(inode);
+
+  lock_release(&filesys_lock);
+  return inumber;
 }

@@ -77,9 +77,12 @@ void *frame_alloc(struct sup_page_table_entry *spte)
   DEBUG_PRINT("[frame_alloc] reused frame kpage=%p old+pagedir=%p new_pagedir= old_upage=%p new_upage=%p\n",
                victim->kpage, victim->pagedir, thread_current()->pagedir, victim->spte->upage, spte->upage);
 
-  memset(victim->kpage, 0, PGSIZE); /* Zero the page for the new owner */
-  victim->spte = spte; /* Reassign victim frame to the new owner */
-  victim->pagedir = thread_current()->pagedir; /* New owner page directory */
+  /* Zero the page for the new owner */
+  memset(victim->kpage, 0, PGSIZE);
+  
+  /* Reassign victim frame to the new owner (old spte was already updated in evict) */
+  victim->spte = spte;
+  victim->pagedir = thread_current()->pagedir;
   
   lock_release(&frame_table_lock);
   return victim->kpage;
@@ -178,33 +181,39 @@ static struct frame_table_entry *frame_table_evict_page(void)
   ASSERT(victim->spte != NULL);
   ASSERT(!is_user_vaddr(victim->kpage));
 
+  /* Save old SPT entry pointer before eviction to update its state */
+  struct sup_page_table_entry *old_spte = victim->spte;
+  
   /* Evict based on page type */
-  if (victim->spte->type == PAGE_ANON)
+  if (old_spte->type == PAGE_ANON)
   {
-    /* All nonymous pages must be swapped out */
-    victim->spte->swap_slot = swap_out(victim->kpage);
-    victim->spte->type = PAGE_SWAP;
+    /* Anonymous pages must be swapped out */
+    old_spte->swap_slot = swap_out(victim->kpage);
+    old_spte->type = PAGE_SWAP;
     DEBUG_PRINT("[evict] swapped out page: upage=%p kpage=%p slot=%zu\n", 
-                victim->spte->upage, victim->kpage, victim->spte->swap_slot);
+                old_spte->upage, victim->kpage, old_spte->swap_slot);
   }
-  else if (victim->spte->type == PAGE_FILE)
+  else if (old_spte->type == PAGE_FILE)
   {
     /* File-backed pages: write back only if dirty and writable */
-    if (pagedir_is_dirty(victim->pagedir, victim->spte->upage) && victim->spte->file_writable)
+    if (pagedir_is_dirty(victim->pagedir, old_spte->upage) && old_spte->file_writable)
     {
       /* Debug: show first few bytes before writeback to help diagnose incorrect contents */
       DEBUG_PRINT("[evict] writing back first bytes: %02x %02x %02x %02x\n",
                   ((uint8_t *)victim->kpage)[0], ((uint8_t *)victim->kpage)[1], ((uint8_t *)victim->kpage)[2], ((uint8_t *)victim->kpage)[3]);
-      file_write_at(victim->spte->file, victim->kpage, victim->spte->read_bytes, victim->spte->file_offset);
+      file_write_at(old_spte->file, victim->kpage, old_spte->read_bytes, old_spte->file_offset);
       DEBUG_PRINT("[evict] wrote dirty file page: upage=%p kpage=%p\n", 
-                  victim->spte->upage, victim->kpage);
+                  old_spte->upage, victim->kpage);
     }
     /* Clean file pages can be reloaded from file, so just evict */
+    /* Keep old_spte->type as PAGE_FILE since it can be reloaded */
   }
 
   /* Unmap from victim's page directory */
-  pagedir_clear_page(victim->pagedir, victim->spte->upage);
-  victim->spte = NULL; /* caller will assign new owner */
+  pagedir_clear_page(victim->pagedir, old_spte->upage);
+  
+  /* Clear victim frame's SPT pointer - caller will assign new owner */
+  victim->spte = NULL;
   /* victim->pinned remains true - caller owns it now */
   /* victim->kpage is reused by caller */
 

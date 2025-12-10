@@ -40,6 +40,7 @@
 #ifdef FILESYS
 #  include "devices/block.h"
 #  include "devices/ide.h"
+#  include "filesys/directory.h"
 #  include "filesys/filesys.h"
 #  include "filesys/fsutil.h"
 #endif
@@ -133,6 +134,9 @@ int main(void)
   ide_init();
   locate_block_devices();
   filesys_init(format_filesys);
+  
+  /* Set initial thread's cwd to root directory. */
+  thread_current()->cwd = dir_open_root();
 #endif
 
 #if defined(USERPROG) && defined(VM)
