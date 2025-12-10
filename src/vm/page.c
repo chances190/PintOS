@@ -9,6 +9,32 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Validates that a page address is properly aligned.
+   Returns true if valid, false otherwise.
+   Note: Does not check is_user_vaddr as SPT can contain kernel pages in some cases. */
+static bool validate_upage(void *upage)
+{
+  return upage != NULL && pg_ofs(upage) == 0;
+}
+
+/* Allocates and initializes a base SPT entry with common fields.
+   Returns the allocated entry or NULL on failure. */
+static struct sup_page_table_entry *allocate_spte(void *upage, enum page_type type, bool writable)
+{
+  ASSERT(validate_upage(upage));
+  
+  struct sup_page_table_entry *spte = malloc(sizeof(struct sup_page_table_entry));
+  if (spte == NULL)
+    return NULL;
+  
+  spte->upage = upage;
+  spte->type = type;
+  spte->swap_slot = 0;
+  spte->file_writable = writable;
+  
+  return spte;
+}
+
 /* Initialize an empty supplemental page table */
 void spt_init(struct list *spt)
 {
@@ -60,23 +86,19 @@ void spt_destroy(struct list *spt)
 struct sup_page_table_entry *spt_create_page_file(
     void *upage, struct file *file, off_t offset, size_t read_bytes, size_t zero_bytes, bool writable)
 {
-  ASSERT(upage != NULL);
-  ASSERT(pg_ofs(upage) == 0);
+  ASSERT(validate_upage(upage));
   ASSERT(file != NULL);
   ASSERT(read_bytes + zero_bytes == PGSIZE);
   
-  struct sup_page_table_entry *spte = malloc(sizeof(struct sup_page_table_entry));
+  struct sup_page_table_entry *spte = allocate_spte(upage, PAGE_FILE, writable);
   if (spte == NULL)
     return NULL;
   
-  spte->upage = upage;
-  spte->type = PAGE_FILE;
-  spte->swap_slot = 0;
   spte->file = file;
   spte->file_offset = offset;
   spte->read_bytes = read_bytes;
   spte->zero_bytes = zero_bytes;
-  spte->file_writable = writable;
+  
   DEBUG_PRINT("[spt_create_page_file] created spte=%p upage=%p file=%p offset=%ld read=%zu zero=%zu writable=%d\n",
                spte, upage, file, (long) offset, read_bytes, zero_bytes, writable);
   
@@ -87,21 +109,17 @@ struct sup_page_table_entry *spt_create_page_file(
    Returns allocated entry or NULL on failure. */
 struct sup_page_table_entry *spt_create_page_anon(void *upage, bool writable)
 {
-  ASSERT(upage != NULL);
-  ASSERT(pg_ofs(upage) == 0);
+  ASSERT(validate_upage(upage));
   
-  struct sup_page_table_entry *spte = malloc(sizeof(struct sup_page_table_entry));
+  struct sup_page_table_entry *spte = allocate_spte(upage, PAGE_ANON, writable);
   if (spte == NULL)
     return NULL;
   
-  spte->upage = upage;
-  spte->type = PAGE_ANON;
-  spte->swap_slot = 0;
   spte->file = NULL;
   spte->file_offset = 0;
   spte->read_bytes = 0;
   spte->zero_bytes = PGSIZE;
-  spte->file_writable = writable;  /* Store writable flag even for anon pages */
+  
   DEBUG_PRINT("[spt_create_page_anon] created spte=%p upage=%p writable=%d\n", spte, upage, writable);
   
   return spte;

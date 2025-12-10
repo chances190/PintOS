@@ -309,6 +309,112 @@ bool dir_readdir(struct dir *dir, char name[NAME_MAX + 1])
   return false;
 }
 
+/* Gets the starting directory for path resolution based on absolute/relative path. */
+static struct dir *get_starting_directory(const char *path)
+{
+  if (path[0] == '/')
+  {
+    return dir_open_root();
+  }
+
+#ifdef USERPROG
+  struct thread *cur = thread_current();
+  if (cur->cwd != NULL)
+  {
+    return dir_reopen(cur->cwd);
+  }
+#endif
+
+  return dir_open_root();
+}
+
+/* Navigates to parent directory using ".." entry. Returns new directory or NULL. */
+static struct dir *navigate_to_parent(struct dir *current)
+{
+  struct inode *parent_inode;
+  if (!dir_lookup(current, "..", &parent_inode))
+  {
+    return NULL;
+  }
+
+  struct dir *parent_dir = dir_open(parent_inode);
+  if (parent_dir == NULL)
+  {
+    inode_close(parent_inode);
+  }
+  return parent_dir;
+}
+
+/* Navigates to named subdirectory. Returns new directory or NULL on failure. */
+static struct dir *navigate_to_subdirectory(struct dir *current, const char *name)
+{
+  struct inode *next_inode;
+  if (!dir_lookup(current, name, &next_inode))
+  {
+    return NULL;
+  }
+
+  if (!inode_is_dir(next_inode))
+  {
+    inode_close(next_inode);
+    return NULL;
+  }
+
+  struct dir *next_dir = dir_open(next_inode);
+  if (next_dir == NULL)
+  {
+    inode_close(next_inode);
+  }
+  return next_dir;
+}
+
+/* Navigates through one path component. Returns new directory or NULL. */
+static struct dir *navigate_path_component(struct dir *current, const char *component)
+{
+  if (strcmp(component, ".") == 0)
+  {
+    return current;
+  }
+
+  if (strcmp(component, "..") == 0)
+  {
+    struct dir *parent = navigate_to_parent(current);
+    if (parent != NULL)
+    {
+      dir_close(current);
+      return parent;
+    }
+
+    return NULL;
+  }
+
+  struct dir *next = navigate_to_subdirectory(current, component);
+  if (next != NULL)
+  {
+    dir_close(current);
+    return next;
+  }
+
+  return NULL;
+}
+
+/* Duplicates a string, returning NULL on failure or empty input. */
+static char *duplicate_string(const char *str)
+{
+  if (str == NULL)
+  {
+    return NULL;
+  }
+
+  size_t len = strlen(str);
+  char *copy = malloc(len + 1);
+  if (copy != NULL)
+  {
+    strlcpy(copy, str, len + 1);
+  }
+  return copy;
+}
+
 /* Parses PATH and returns the final component name, storing the parent
    directory in *DIR_OUT. Returns NULL on failure. Caller must free the
    returned string. Handles both absolute and relative paths.
@@ -326,147 +432,55 @@ char *dir_parse_path(const char *path, struct dir **dir_out)
     return NULL;
   }
 
-  /* Duplicate the path for modification. */
-  char *path_copy = malloc(strlen(path) + 1);
+  char *path_copy = duplicate_string(path);
   if (path_copy == NULL)
   {
     return NULL;
   }
-  strlcpy(path_copy, path, strlen(path) + 1);
 
-  /* Start from root or current directory. */
-  struct dir *dir;
-  if (path[0] == '/')
-  {
-    dir = dir_open_root();
-  }
-  else
-  {
-#ifdef USERPROG
-    struct thread *cur = thread_current();
-    if (cur->cwd == NULL)
-    {
-      dir = dir_open_root();
-    }
-    else
-    {
-      dir = dir_reopen(cur->cwd);
-    }
-#else
-    dir = dir_open_root();
-#endif
-  }
-
+  struct dir *dir = get_starting_directory(path);
   if (dir == NULL)
   {
     free(path_copy);
     return NULL;
   }
 
-  /* Tokenize the path and navigate. */
+  /* Navigate through path components. */
   char *save_ptr;
-  char *token;
+  char *token = strtok_r(path_copy, "/", &save_ptr);
   char *prev_token = NULL;
-  
-  token = strtok_r(path_copy, "/", &save_ptr);
+
   while (token != NULL)
   {
     char *next_token = strtok_r(NULL, "/", &save_ptr);
-    
+
+    /* Only navigate if not the last component. */
     if (next_token != NULL)
     {
-      /* Not the last component, navigate into this directory. */
-      if (strcmp(token, ".") == 0)
+      struct dir *next_dir = navigate_path_component(dir, token);
+      if (next_dir == NULL)
       {
-        /* Stay in current directory. */
+        dir_close(dir);
+        free(path_copy);
+        return NULL;
       }
-      else if (strcmp(token, "..") == 0)
-      {
-        /* Go to parent directory. */
-        struct inode *parent_inode;
-        if (dir_lookup(dir, "..", &parent_inode))
-        {
-          struct dir *parent_dir = dir_open(parent_inode);
-          if (parent_dir != NULL)
-          {
-            dir_close(dir);
-            dir = parent_dir;
-          }
-          else
-          {
-            inode_close(parent_inode);
-          }
-        }
-      }
-      else
-      {
-        /* Navigate to the named directory. */
-        struct inode *next_inode;
-        if (dir_lookup(dir, token, &next_inode))
-        {
-          if (inode_is_dir(next_inode))
-          {
-            struct dir *next_dir = dir_open(next_inode);
-            if (next_dir != NULL)
-            {
-              dir_close(dir);
-              dir = next_dir;
-            }
-            else
-            {
-              inode_close(next_inode);
-              dir_close(dir);
-              free(path_copy);
-              return NULL;
-            }
-          }
-          else
-          {
-            /* Path component is not a directory. */
-            inode_close(next_inode);
-            dir_close(dir);
-            free(path_copy);
-            return NULL;
-          }
-        }
-        else
-        {
-          /* Directory component doesn't exist. */
-          dir_close(dir);
-          free(path_copy);
-          return NULL;
-        }
-      }
+      dir = next_dir;
     }
-    
+
     prev_token = token;
     token = next_token;
   }
 
-  /* Return the directory and the final component. */
   *dir_out = dir;
-  
-  /* Allocate and return the final component name. */
-  char *name = NULL;
-  if (prev_token != NULL)
-  {
-    name = malloc(strlen(prev_token) + 1);
-    if (name != NULL)
-    {
-      strlcpy(name, prev_token, strlen(prev_token) + 1);
-    }
-  }
-  else
-  {
-    /* Path was "/" or empty after tokenization. */
-    name = malloc(1);
-    if (name != NULL)
-    {
-      name[0] = '\0';
-    }
-  }
 
+  /* Return the final component name. */
+  char *name = (prev_token != NULL) ? duplicate_string(prev_token) : duplicate_string("");
   free(path_copy);
+  if (name == NULL)
+  {
+    dir_close(dir);
+    return NULL;
+  }
   return name;
 }
 

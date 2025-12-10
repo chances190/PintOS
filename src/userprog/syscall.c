@@ -482,6 +482,97 @@ static bool strncpy_to_user(void *user_dst, const char *kernel_src, size_t max_l
   return false;
 }
 
+/* === Helper Functions for Directory Operations === */
+
+/* Validates and copies a user-provided path string to kernel space.
+   Returns kernel buffer on success (caller must free), NULL on failure.
+   Exits process with -1 if copy fails. */
+static char *validate_and_copy_path(const char *user_path)
+{
+  if (user_path == NULL)
+  {
+    return NULL;
+  }
+
+  char *kernel_path = malloc(PATH_MAX);
+  if (kernel_path == NULL)
+  {
+    return NULL;
+  }
+
+  if (!strncpy_from_user(kernel_path, (void *) user_path, PATH_MAX))
+  {
+    free(kernel_path);
+    syscall_exit(-1);
+  }
+
+  if (kernel_path[0] == '\0')
+  {
+    free(kernel_path);
+    return NULL;
+  }
+
+  return kernel_path;
+}
+
+/* Parses a path and returns both parent directory and final component name.
+   Returns true on success, false on failure. Caller must close the returned directory in parent_out. */
+static bool parse_directory_path(const char *path, struct dir **parent_out, char *name_out)
+{
+  if (!dir_lookup_path(path, parent_out, name_out))
+  {
+    return false;
+  }
+
+  if (strlen(name_out) == 0)
+  {
+    dir_close(*parent_out);
+    return false;
+  }
+
+  return true;
+}
+
+/* Resolves a path to a directory. Returns directory handle or NULL.
+   Handles both paths that end in a directory component and empty names. */
+static struct dir *resolve_directory_from_path(const char *path)
+{
+  struct dir *target_dir;
+  char name[NAME_MAX + 1];
+
+  if (!dir_lookup_path(path, &target_dir, name))
+  {
+    return NULL;
+  }
+
+  /* If name is not empty, look up the directory. */
+  if (strlen(name) > 0)
+  {
+    struct inode *inode;
+    if (!dir_lookup(target_dir, name, &inode))
+    {
+      dir_close(target_dir);
+      return NULL;
+    }
+
+    if (!inode_is_dir(inode))
+    {
+      inode_close(inode);
+      dir_close(target_dir);
+      return NULL;
+    }
+
+    struct dir *result = dir_open(inode);
+    dir_close(target_dir);
+    return result;
+  }
+
+  /* Path ended at a directory (e.g., "/" or ".."). */
+  return target_dir;
+}
+
+/* === End of Helper Functions === */
+
 static void syscall_halt(void) { shutdown_power_off(); }
 
 static void syscall_exit(int status)
@@ -801,61 +892,15 @@ static void syscall_munmap(mapid_t mapping)
 
 static bool syscall_chdir(const char *dir)
 {
-  char *kernel_dir = malloc(PATH_MAX);
+  char *kernel_dir = validate_and_copy_path(dir);
   if (kernel_dir == NULL)
   {
     return false;
   }
 
-  if (!strncpy_from_user(kernel_dir, (void *) dir, PATH_MAX))
-  {
-    free(kernel_dir);
-    syscall_exit(-1);
-  }
-
-  if (kernel_dir[0] == '\0')
-  {
-    free(kernel_dir);
-    return false;
-  }
-
   lock_acquire(&filesys_lock);
-  
-  /* Parse the path to get the directory. */
-  struct dir *target_dir;
-  char name[NAME_MAX + 1];
-  
-  if (!dir_lookup_path(kernel_dir, &target_dir, name))
-  {
-    lock_release(&filesys_lock);
-    free(kernel_dir);
-    return false;
-  }
 
-  /* If name is not empty, we need to look up the directory. */
-  struct dir *new_cwd = NULL;
-  if (strlen(name) > 0)
-  {
-    struct inode *inode;
-    if (dir_lookup(target_dir, name, &inode))
-    {
-      if (inode_is_dir(inode))
-      {
-        new_cwd = dir_open(inode);
-      }
-      else
-      {
-        inode_close(inode);
-      }
-    }
-    dir_close(target_dir);
-  }
-  else
-  {
-    /* Path ended at a directory (e.g., "/" or ".."). */
-    new_cwd = target_dir;
-  }
-
+  struct dir *new_cwd = resolve_directory_from_path(kernel_dir);
   if (new_cwd == NULL)
   {
     lock_release(&filesys_lock);
@@ -878,53 +923,30 @@ static bool syscall_chdir(const char *dir)
 
 static bool syscall_mkdir(const char *dir)
 {
-  char *kernel_dir = malloc(PATH_MAX);
+  char *kernel_dir = validate_and_copy_path(dir);
   if (kernel_dir == NULL)
   {
-    DEBUG_PRINT("[mkdir] malloc failed\n");
+    DEBUG_PRINT("[mkdir] invalid path\n");
     return false;
-  }
-
-  if (!strncpy_from_user(kernel_dir, (void *) dir, PATH_MAX))
-  {
-    free(kernel_dir);
-    syscall_exit(-1);
   }
 
   DEBUG_PRINT("[mkdir] path='%s'\n", kernel_dir);
 
-  if (kernel_dir[0] == '\0')
-  {
-    DEBUG_PRINT("[mkdir] empty path\n");
-    free(kernel_dir);
-    return false;
-  }
-
   lock_acquire(&filesys_lock);
-  
-  /* Parse the path to get the parent directory and new directory name. */
+
+  /* Parse the path to get parent directory and new directory name. */
   struct dir *parent_dir;
   char name[NAME_MAX + 1];
-  
-  if (!dir_lookup_path(kernel_dir, &parent_dir, name))
+
+  if (!parse_directory_path(kernel_dir, &parent_dir, name))
   {
-    DEBUG_PRINT("[mkdir] dir_lookup_path failed\n");
+    DEBUG_PRINT("[mkdir] parse failed\n");
     lock_release(&filesys_lock);
     free(kernel_dir);
     return false;
   }
 
   DEBUG_PRINT("[mkdir] parsed: name='%s'\n", name);
-
-  if (strlen(name) == 0)
-  {
-    /* Cannot create root directory. */
-    DEBUG_PRINT("[mkdir] empty name\n");
-    dir_close(parent_dir);
-    lock_release(&filesys_lock);
-    free(kernel_dir);
-    return false;
-  }
 
   /* Allocate a sector for the new directory. */
   block_sector_t inode_sector = 0;
@@ -933,14 +955,12 @@ static bool syscall_mkdir(const char *dir)
 
   if (success)
   {
-    /* Create the directory with space for 16 entries. */
     success = dir_create(inode_sector, 16);
     DEBUG_PRINT("[mkdir] dir_create: %s\n", success ? "OK" : "FAIL");
   }
 
   if (success)
   {
-    /* Update the ".." entry to point to the parent directory. */
     block_sector_t parent_sector = inode_get_inumber(dir_get_inode(parent_dir));
     success = dir_set_parent(inode_sector, parent_sector);
     DEBUG_PRINT("[mkdir] dir_set_parent: %s\n", success ? "OK" : "FAIL");
@@ -948,7 +968,6 @@ static bool syscall_mkdir(const char *dir)
 
   if (success)
   {
-    /* Add the entry to the parent directory. */
     success = dir_add(parent_dir, name, inode_sector);
     DEBUG_PRINT("[mkdir] dir_add: %s\n", success ? "OK" : "FAIL");
   }

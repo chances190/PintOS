@@ -28,6 +28,38 @@ static thread_func start_process NO_RETURN;
 static bool load(const char *, void (**)(void), void **);
 static struct process_info *init_process_info(void);
 
+/* Resource holder for process_execute to ensure proper cleanup on failure.
+   Uses a simple "free on destroy" pattern to prevent resource leaks. */
+struct process_exec_resources
+{
+    char *filename;
+    char *exec_string_copy;
+    struct process_info *proc_info;
+    struct start_process_args *args;
+};
+
+/* Initializes all resources to NULL */
+static void init_exec_resources(struct process_exec_resources *res)
+{
+  res->filename = NULL;
+  res->exec_string_copy = NULL;
+  res->proc_info = NULL;
+  res->args = NULL;
+}
+
+/* Frees all allocated resources */
+static void cleanup_exec_resources(struct process_exec_resources *res)
+{
+  if (res->filename != NULL)
+    palloc_free_page(res->filename);
+  if (res->exec_string_copy != NULL)
+    palloc_free_page(res->exec_string_copy);
+  if (res->proc_info != NULL)
+    free(res->proc_info);
+  if (res->args != NULL)
+    free(res->args);
+}
+
 struct start_process_args
 {
     char *exec_string;
@@ -40,74 +72,68 @@ struct start_process_args
    thread id, or PID_ERROR if the thread cannot be created. */
 pid_t process_execute(const char *exec_string)
 {
-  char *exec_string_cp = NULL, *filename = NULL;
+  struct process_exec_resources res;
+  init_exec_resources(&res);
+  
   size_t fn_len;
   tid_t tid;
   struct thread *cur = thread_current();
   struct process_info *child_exec_status;
 
-  /* Make a copy of FILE_NAME for the child process
-  (first token before space) */
-  filename = palloc_get_page(0);
-  if (filename == NULL)
-  {
-    return TID_ERROR;
-  }
+  /* Make a copy of FILE_NAME for the child process (first token before space) */
+  res.filename = palloc_get_page(0);
+  if (res.filename == NULL)
+    goto cleanup_and_fail;
+  
   fn_len = strcspn(exec_string, " ");
   if (fn_len >= PGSIZE)
-  {
     fn_len = PGSIZE - 1;
-  }
-  strlcpy(filename, exec_string, fn_len + 1);
+  strlcpy(res.filename, exec_string, fn_len + 1);
 
   /* Make a copy of EXEC_STRING for the child process */
-  exec_string_cp = palloc_get_page(0);
-  if (exec_string_cp == NULL)
-  {
-    palloc_free_page(filename);
-    return PID_ERROR;
-  }
-  strlcpy(exec_string_cp, exec_string, PGSIZE);
+  res.exec_string_copy = palloc_get_page(0);
+  if (res.exec_string_copy == NULL)
+    goto cleanup_and_fail;
+  strlcpy(res.exec_string_copy, exec_string, PGSIZE);
 
   /* Create an EXEC_STATUS struct for the child process. */
   DEBUG_PRINT("[process_execute] Creating child status\n");
-  child_exec_status = init_process_info();
-  if (child_exec_status == NULL)
-  {
-    palloc_free_page(filename);
-    palloc_free_page(exec_string_cp);
-    return PID_ERROR;
-  }
+  res.proc_info = init_process_info();
+  if (res.proc_info == NULL)
+    goto cleanup_and_fail;
 
-  /* Pack the arguments of start_process into a struct*/
-  struct start_process_args *args = malloc(sizeof(struct start_process_args));
-  if (args == NULL)
-  {
-    free(child_exec_status);
-    palloc_free_page(filename);
-    palloc_free_page(exec_string_cp);
-    return PID_ERROR;
-  }
-  args->exec_string = exec_string_cp;
-  args->proc_info = child_exec_status;
+  /* Pack the arguments of start_process into a struct */
+  res.args = malloc(sizeof(struct start_process_args));
+  if (res.args == NULL)
+    goto cleanup_and_fail;
+  
+  res.args->exec_string = res.exec_string_copy;
+  res.args->proc_info = res.proc_info;
 
   /* Create a new thread to execute FILENAME as an user process. */
-  DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", filename);
-  tid = thread_create(filename, PRI_DEFAULT, start_process, args);
-  palloc_free_page(filename);
+  DEBUG_PRINT("[process_execute] Creating thread for '%s'\n", res.filename);
+  tid = thread_create(res.filename, PRI_DEFAULT, start_process, res.args);
+  
+  /* filename no longer needed after thread_create */
+  palloc_free_page(res.filename);
+  res.filename = NULL;
+  
   if (tid == TID_ERROR)
   {
     /* Couldn't create thread for child process */
     DEBUG_PRINT("[process_execute] thread_create failed\n");
-    free(child_exec_status);
-    palloc_free_page(exec_string_cp);
-    free(args);
-    return PID_ERROR;
+    goto cleanup_and_fail;
   }
 
-  /* Add the new process as a child of the current process. */
+  /* Add the new process as a child of the current process */
   DEBUG_PRINT("[process_execute] Process created with pid=%d\n", tid);
+  child_exec_status = res.proc_info;
   list_push_back(&cur->children, &child_exec_status->elem);
+
+  /* Transfer ownership of resources to child thread */
+  res.exec_string_copy = NULL;
+  res.proc_info = NULL;
+  res.args = NULL;
 
   /* Wait for child to finish loading. */
   DEBUG_PRINT("[process_execute] Waiting for child to load...\n");
@@ -122,6 +148,10 @@ pid_t process_execute(const char *exec_string)
 
   DEBUG_PRINT("[process_execute] Load completed. Returning pid=%d\n", tid);
   return (pid_t) tid;
+
+cleanup_and_fail:
+  cleanup_exec_resources(&res);
+  return PID_ERROR;
 }
 
 /* A thread function that loads a user process and starts it
