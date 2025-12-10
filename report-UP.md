@@ -342,3 +342,23 @@
 - ✅ `filesys/base/syn-write`: Escrita concorrente no mesmo arquivo — valida locks e atomicidade.
 
 - ✅ `userprog/no-vm/multi-oom`: Múltiplos processos até OOM — comportamento correto quando memória física se esgota.
+
+### Parte 5 - Page Faults em buffers de usuário e saída de órfãos
+
+#### `src/userprog/exception.c`
+- Modificado: `page_fault()` — trata faltas de página em endereços de usuário originadas tanto em modo usuário quanto em modo kernel (cópias de syscalls). Passa a usar `cur->user_esp` quando o fault ocorre no kernel para validar crescimento de pilha e carregar páginas pelo SPT, removendo o desvio artificial via `eax`.
+- Ajustado: verificação de crescimento de pilha exige `esp` não nulo, limita a 8 MB abaixo de `PHYS_BASE` e mantém a tolerância de 32 bytes para instruções de push, aceitando apenas endereços acima de `USER_STACK_BASE`.
+
+#### `src/userprog/process.c`
+- Modificado: `process_exit()` — grava `exit_status` antes de decidir orfandade, sinaliza o pai apenas quando presente e posterga o `free` de `process_info` órfão para depois do log `exit(status)`, eliminando use-after-free e garantindo que o status seja reportado sempre.
+
+#### Design
+- Faults em buffers de usuário disparados durante cópias de kernel agora seguem o mesmo caminho das faltas em modo usuário: localização via SPT, carregamento lazy com `vm_load()` e crescimento de pilha válido usando o `esp` do usuário salvo no trap. Isso evita `exit(-1)` espúrio em leituras que atravessam múltiplas páginas.
+- A finalização de processos mantém `exit_status` consistente mesmo para órfãos: o status é persistido antes de qualquer decisão, o pai é sinalizado quando existe, e a estrutura só é liberada após imprimir o log de saída.
+
+#### Resultados de Testes
+- ✅ `userprog/read-boundary`: Leitura atravessando limite de página — page faults resolvidos via lazy loading.
+- ✅ `userprog/bad-write`: Escrita em ponteiro nulo — encerra com `exit(-1)` e log de status.
+- ✅ `filesys/base/syn-write`: Escrita concorrente no mesmo arquivo — leituras posteriores não falham em buffers grandes.
+- ✅ `filesys/extended/syn-rw`: Leitura concorrente enquanto arquivo cresce — filhos terminam sem abortar por page fault.
+- ✅ `filesys/extended/syn-rw-persistence`: Persistência após crescimento concorrente — estado preservado após reboot simulado.

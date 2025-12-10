@@ -270,18 +270,14 @@ void process_exit(int status)
      access orphan/has_exited to decide who frees. */
   lock_acquire(&cur_info->lock);
   cur_info->has_exited = true;
+  cur_info->exit_status = status;
   bool orphan = cur_info->orphan;
   lock_release(&cur_info->lock);
 
   DEBUG_PRINT("[process_exit] %s\n", orphan ? "Parent gone, will free process_info" : "Signaling parent (sema_up on wait_sema)");
 
-  if (orphan)
+  if (!orphan)
   {
-    free(cur_info); /* Parent is gone. We own this structure now. */
-  }
-  else
-  {
-    cur_info->exit_status = status;
     sema_up(&cur_info->wait_sema); /* Parent will wait. Signal it. */
   }
 
@@ -359,6 +355,11 @@ void process_exit(int status)
   }
 
   printf("%s: exit(%d)\n", cur->name, cur_info->exit_status);
+
+  if (orphan)
+  {
+    free(cur_info);
+  }
 }
 
 /* Sets up the CPU for running user code in the current

@@ -635,6 +635,11 @@ static bool syscall_create(const char *file, unsigned initial_size)
   bool ok = filesys_create(kernel_file, initial_size);
   lock_release(&filesys_lock);
 
+  if (!ok)
+  {
+    DEBUG_PRINT("[create] failed for '%s' size=%u\n", kernel_file, initial_size);
+  }
+
   free(kernel_file);
   return ok;
 }
@@ -691,12 +696,14 @@ static int syscall_open(const char *file)
   struct file *fp = filesys_open(kernel_file);
   lock_release(&filesys_lock);
 
-  free(kernel_file);
-
   if (fp == NULL)
   {
+    DEBUG_PRINT("[open] failed for '%s'\n", kernel_file);
+    free(kernel_file);
     return -1;
   }
+
+  free(kernel_file);
 
   int fd = fd_table_alloc(fp);
   if (fd == -1)
@@ -903,6 +910,7 @@ static bool syscall_chdir(const char *dir)
   struct dir *new_cwd = resolve_directory_from_path(kernel_dir);
   if (new_cwd == NULL)
   {
+    DEBUG_PRINT("[chdir] failed to resolve '%s'\n", kernel_dir);
     lock_release(&filesys_lock);
     free(kernel_dir);
     return false;
@@ -940,7 +948,7 @@ static bool syscall_mkdir(const char *dir)
 
   if (!parse_directory_path(kernel_dir, &parent_dir, name))
   {
-    DEBUG_PRINT("[mkdir] parse failed\n");
+    DEBUG_PRINT("[mkdir] parse failed for '%s'\n", kernel_dir);
     lock_release(&filesys_lock);
     free(kernel_dir);
     return false;
@@ -952,11 +960,19 @@ static bool syscall_mkdir(const char *dir)
   block_sector_t inode_sector = 0;
   bool success = free_map_allocate(1, &inode_sector);
   DEBUG_PRINT("[mkdir] free_map_allocate: %s (sector=%u)\n", success ? "OK" : "FAIL", inode_sector);
+  if (!success)
+  {
+    DEBUG_PRINT("[mkdir] free_map_allocate failed for '%s'\n", kernel_dir);
+  }
 
   if (success)
   {
     success = dir_create(inode_sector, 16);
     DEBUG_PRINT("[mkdir] dir_create: %s\n", success ? "OK" : "FAIL");
+    if (!success)
+    {
+      DEBUG_PRINT("[mkdir] dir_create failed for '%s' (sector=%u)\n", kernel_dir, inode_sector);
+    }
   }
 
   if (success)
@@ -964,12 +980,20 @@ static bool syscall_mkdir(const char *dir)
     block_sector_t parent_sector = inode_get_inumber(dir_get_inode(parent_dir));
     success = dir_set_parent(inode_sector, parent_sector);
     DEBUG_PRINT("[mkdir] dir_set_parent: %s\n", success ? "OK" : "FAIL");
+    if (!success)
+    {
+      DEBUG_PRINT("[mkdir] dir_set_parent failed for '%s' (child=%u parent=%u)\n", kernel_dir, inode_sector, parent_sector);
+    }
   }
 
   if (success)
   {
     success = dir_add(parent_dir, name, inode_sector);
     DEBUG_PRINT("[mkdir] dir_add: %s\n", success ? "OK" : "FAIL");
+    if (!success)
+    {
+      DEBUG_PRINT("[mkdir] dir_add failed for '%s' (name='%s' sector=%u)\n", kernel_dir, name, inode_sector);
+    }
   }
 
   if (!success && inode_sector != 0)
@@ -985,11 +1009,14 @@ static bool syscall_mkdir(const char *dir)
 
 static bool syscall_readdir(int fd, char name[READDIR_MAX_LEN + 1])
 {
+  DEBUG_PRINT("[readdir] fd=%d user_ptr=%p\n", fd, name);
+
   lock_acquire(&filesys_lock);
 
   struct file *file = fd_table_get(fd);
   if (file == NULL)
   {
+    DEBUG_PRINT("[readdir] invalid fd=%d\n", fd);
     lock_release(&filesys_lock);
     return false;
   }
@@ -997,6 +1024,7 @@ static bool syscall_readdir(int fd, char name[READDIR_MAX_LEN + 1])
   struct inode *inode = file_get_inode(file);
   if (!inode_is_dir(inode))
   {
+    DEBUG_PRINT("[readdir] fd=%d not a directory\n", fd);
     lock_release(&filesys_lock);
     return false;
   }
@@ -1005,6 +1033,7 @@ static bool syscall_readdir(int fd, char name[READDIR_MAX_LEN + 1])
   struct dir *dir = dir_open(inode_reopen(inode));
   if (dir == NULL)
   {
+    DEBUG_PRINT("[readdir] fd=%d dir_open failed\n", fd);
     lock_release(&filesys_lock);
     return false;
   }
@@ -1020,6 +1049,7 @@ static bool syscall_readdir(int fd, char name[READDIR_MAX_LEN + 1])
     if (strcmp(kernel_name, ".") != 0 && strcmp(kernel_name, "..") != 0)
     {
       found = true;
+      DEBUG_PRINT("[readdir] fd=%d -> '%s' (pos=%zu)\n", fd, kernel_name, dir_get_pos(dir));
       break;
     }
   }
@@ -1031,12 +1061,11 @@ static bool syscall_readdir(int fd, char name[READDIR_MAX_LEN + 1])
 
   if (found)
   {
-    /* Copy the name to user space. */
-    if (!memcpy_to_user(name, kernel_name, strlen(kernel_name) + 1))
-    {
-      lock_release(&filesys_lock);
-      syscall_exit(-1);
-    }
+    strlcpy(name, kernel_name, READDIR_MAX_LEN + 1);
+  }
+  else
+  {
+    DEBUG_PRINT("[readdir] fd=%d end of directory\n", fd);
   }
 
   lock_release(&filesys_lock);

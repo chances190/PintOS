@@ -149,6 +149,11 @@ bool dir_lookup(const struct dir *dir, const char *name, struct inode **inode)
   if (lookup(dir, name, &e, NULL))
   {
     *inode = inode_open(e.inode_sector);
+    if (*inode != NULL && inode_is_removed(*inode))
+    {
+      inode_close(*inode);
+      *inode = NULL;
+    }
   }
   else
   {
@@ -371,6 +376,13 @@ static struct dir *navigate_to_subdirectory(struct dir *current, const char *nam
 /* Navigates through one path component. Returns new directory or NULL. */
 static struct dir *navigate_path_component(struct dir *current, const char *component)
 {
+  /* Fail if current directory inode was removed. */
+  if (current != NULL && inode_is_removed(dir_get_inode(current)))
+  {
+    dir_close(current);
+    return NULL;
+  }
+
   if (strcmp(component, ".") == 0)
   {
     return current;
@@ -441,6 +453,14 @@ char *dir_parse_path(const char *path, struct dir **dir_out)
   struct dir *dir = get_starting_directory(path);
   if (dir == NULL)
   {
+    free(path_copy);
+    return NULL;
+  }
+
+  /* If starting directory was removed, deny resolution. */
+  if (inode_is_removed(dir_get_inode(dir)))
+  {
+    dir_close(dir);
     free(path_copy);
     return NULL;
   }
