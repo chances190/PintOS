@@ -128,6 +128,10 @@ struct thread
 
     /* Virtual memory. */
     struct list sup_page_table;
+    void *user_esp;                 /* Saved user stack pointer for syscalls. */
+   /* Memory mappings */
+   struct list mappings;           /* List of mmap_region entries */
+   int next_mapid;                 /* Next mapping id to allocate */
 #endif
     /* Owned by thread.c */
     struct list_elem allelem; /* List element for all threads list. */

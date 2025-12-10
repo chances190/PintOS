@@ -206,6 +206,11 @@ Formatting and content rules (mandatory)
    make clean
    make check
    ```
+   or
+   ```bash
+   cd src/<phase>/build
+   make tests/<phase>/<test>.result
+   ```
 
 5. **Analyze test results**:
     - Review output in `build/tests/<phase>/<test>.output` and `.errors`

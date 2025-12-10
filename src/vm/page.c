@@ -4,33 +4,16 @@
 #include "threads/malloc.h"
 #include "threads/vaddr.h"
 
+// #define DEBUG
 #include <debug.h>
 #include <string.h>
+#include <stdio.h>
 
 /* Initialize an empty supplemental page table */
 void spt_init(struct list *spt)
 {
   ASSERT(spt != NULL);
   list_init(spt);
-}
-
-/* Insert an entry into the supplemental page table.
-   Returns true on success, false if entry already exists. */
-bool spt_insert(struct list *spt, struct sup_page_table_entry *spte)
-{
-  ASSERT(spt != NULL);
-  ASSERT(spte != NULL);
-  ASSERT(pg_ofs(spte->user_vaddr) == 0); /* Must be page-aligned */
-
-  /* Check if entry already exists */
-  if (spt_lookup(spt, spte->user_vaddr) != NULL)
-  {
-    return false;
-  }
-
-  /* Add to list */
-  list_push_back(spt, &spte->elem);
-  return true;
 }
 
 /* Look up a page in the supplemental page table.
@@ -40,7 +23,7 @@ struct sup_page_table_entry *spt_lookup(struct list *spt, void *vaddr)
 {
   ASSERT(spt != NULL);
 
-  void *page = pg_round_down(vaddr);
+  void *upage = pg_round_down(vaddr);
   struct list_elem *e;
 
   for (e = list_begin(spt); e != list_end(spt); e = list_next(e))
@@ -48,28 +31,13 @@ struct sup_page_table_entry *spt_lookup(struct list *spt, void *vaddr)
     struct sup_page_table_entry *spte;
     spte = list_entry(e, struct sup_page_table_entry, elem);
 
-    if (spte->user_vaddr == page)
+    if (spte->upage == upage)
     {
       return spte;
     }
   }
 
   return NULL;
-}
-
-/* Delete an entry from the supplemental page table.
-   Frees the entry's memory. */
-void spt_delete(struct list *spt, void *vaddr)
-{
-  ASSERT(spt != NULL);
-
-  struct sup_page_table_entry *spte = spt_lookup(spt, vaddr);
-
-  if (spte != NULL)
-  {
-    list_remove(&spte->elem);
-    free(spte);
-  }
 }
 
 /* Destroy the supplemental page table and free all entries */
@@ -82,21 +50,59 @@ void spt_destroy(struct list *spt)
   while (!list_empty(spt))
   {
     e = list_pop_front(spt);
-    struct sup_page_table_entry *spte;
-    spte = list_entry(e, struct sup_page_table_entry, elem);
+    struct sup_page_table_entry *spte = list_entry(e, struct sup_page_table_entry, elem);
     free(spte);
   }
 }
 
-/* Update the access time of a page to current time */
-void spt_update_access_time(struct list *spt, void *vaddr)
+/* Create a file-backed SPT entry (for executable segments or mmap).
+   Returns allocated entry or NULL on failure. */
+struct sup_page_table_entry *spt_create_page_file(
+    void *upage, struct file *file, off_t offset, size_t read_bytes, size_t zero_bytes, bool writable)
 {
-  ASSERT(spt != NULL);
+  ASSERT(upage != NULL);
+  ASSERT(pg_ofs(upage) == 0);
+  ASSERT(file != NULL);
+  ASSERT(read_bytes + zero_bytes == PGSIZE);
+  
+  struct sup_page_table_entry *spte = malloc(sizeof(struct sup_page_table_entry));
+  if (spte == NULL)
+    return NULL;
+  
+  spte->upage = upage;
+  spte->type = PAGE_FILE;
+  spte->swap_slot = 0;
+  spte->file = file;
+  spte->file_offset = offset;
+  spte->read_bytes = read_bytes;
+  spte->zero_bytes = zero_bytes;
+  spte->file_writable = writable;
+  DEBUG_PRINT("[spt_create_page_file] created spte=%p upage=%p file=%p offset=%ld read=%zu zero=%zu writable=%d\n",
+               spte, upage, file, (long) offset, read_bytes, zero_bytes, writable);
+  
+  return spte;
+}
 
-  struct sup_page_table_entry *spte = spt_lookup(spt, vaddr);
-
-  if (spte != NULL)
-  {
-    spte->access_time = timer_ticks();
-  }
+/* Create an anonymous (zero-backed) SPT entry (for stack, zero pages).
+   Returns allocated entry or NULL on failure. */
+struct sup_page_table_entry *spt_create_page_anon(void *upage, bool writable)
+{
+  ASSERT(upage != NULL);
+  ASSERT(pg_ofs(upage) == 0);
+  
+  struct sup_page_table_entry *spte = malloc(sizeof(struct sup_page_table_entry));
+  if (spte == NULL)
+    return NULL;
+  
+  spte->upage = upage;
+  spte->type = PAGE_ANON;
+  spte->swap_slot = 0;
+  spte->file = NULL;
+  spte->file_offset = 0;
+  spte->read_bytes = 0;
+  spte->zero_bytes = PGSIZE;
+  spte->file_writable = writable;  /* Store writable flag even for anon pages */
+  DEBUG_PRINT("[spt_create_page_anon] created spte=%p upage=%p writable=%d\n", spte, upage, writable);
+  
+  return spte;
 }

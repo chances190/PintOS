@@ -6,7 +6,8 @@
 
 uint32_t *pagedir_create(void);
 void pagedir_destroy(uint32_t *pd);
-bool pagedir_install_page(uint32_t *pd, void *upage, void *kpage, bool writable);
+bool pagedir_map_page(uint32_t *pd, void *upage, void *kpage, bool writable);
+void *pagedir_get_page(uint32_t *pd, const void *upage);
 void pagedir_clear_page(uint32_t *pd, void *upage);
 bool pagedir_is_dirty(uint32_t *pd, const void *upage);
 void pagedir_set_dirty(uint32_t *pd, const void *upage, bool dirty);
